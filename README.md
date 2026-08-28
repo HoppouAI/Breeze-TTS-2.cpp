@@ -79,10 +79,7 @@ breeze-cli           # run the CLI
 breeze-server        # run the server
 ```
 
-## Convert the weights
-
 ## Weights
-
 
 <div align="center">
 
@@ -181,13 +178,16 @@ Worth knowing before you rely on it:
 
 - It defaults to near greedy sampling (`--temp 0.3 --top-k 1`) on purpose. Opening sampling up lets
   source timbre leak back into the result, which measurably weakens the target identity.
-- **Pitch and melody do not survive.** The converted take follows the target voice's natural pitch, not
-  the source's, so singing comes out spoken. `--keep-acoustic 1` or `2` retains the lowest acoustic
-  codebooks from the source and recovers a usable amount of melody, at some cost to how cleanly the
-  target voice comes through. Higher values fall apart.
+- **Pitch is regenerated, not copied.** The take is re-sung in the target voice's own register rather
+  than at the source's, so a converted vocal can land a fifth away from the original. Whether the tune
+  survives varies by clip, so judge it by ear. `--keep-acoustic 1` or `2` copies the lowest acoustic
+  codebooks straight from the source and pulls more of the original contour through, at some cost to
+  how cleanly the target voice comes out. Higher values fall apart, and on ordinary speech even 1
+  causes warbling, so leave it at 0 unless the source is sung.
 - Runs at roughly realtime, so a three minute recording takes about three minutes.
-- `--text` is optional. Giving the source transcript lines the backbone up with the forced codes and
-  generally helps, but leaving it out runs textless and still works.
+- `--text` is optional but matters most here. Giving the source transcript lines the backbone up with
+  the forced codes. The same sung clip came back as "Does it pinch I? Send my tears" textless, and as
+  "drink it up, I have no fear" once the lyrics were supplied.
 
 See [docs/voice-conversion.md](docs/voice-conversion.md).
 
