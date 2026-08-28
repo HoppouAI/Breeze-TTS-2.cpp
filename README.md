@@ -37,6 +37,26 @@ cmake --build build -j
 Add `-DBREEZE_VULKAN=OFF` for a CPU only build. Outputs are `breeze-cli`, `breeze-server`,
 `breeze-quantize` and the shared library.
 
+### Nix
+
+If you have [Nix](https://nixos.org/) with flake support, the dev shell provides all build
+dependencies (CMake, Ninja, Vulkan SDK, Python for conversion) and a few convenience commands:
+
+To enter the dev shell, run:
+
+```
+nix develop          # or: nix develop .#cpu
+```
+
+After entering the dev shell, run the following commands to build and run the CLI/server:
+
+```
+breeze-build         # configure + build (Vulkan)
+breeze-build --cpu   # configure + build (CPU only)
+breeze-cli           # run the CLI
+breeze-server        # run the server
+```
+
 ## Convert the weights
 
 The runtime loads a single GGUF file. The download must include the `audio_tokenizer/` directory,
