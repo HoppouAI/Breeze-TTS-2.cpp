@@ -168,7 +168,8 @@ static void speaker(WsConn & conn, Session & s, std::mutex & gpu) {
 }
 
 static void handle_start(WsConn & conn, Session & s, const std::string & msg, BreezeModel & model,
-                         MimiCodec & codec, VoiceStore & store, int chunk_first, int chunk_max) {
+                         MimiCodec & codec, VoiceStore & store, int chunk_first, int chunk_max,
+                         int split_chars) {
     GenRequest g;
     g.instruction = json_str(msg, "instruction");
     if (g.instruction.empty()) g.instruction = "Speak clearly and naturally.";
@@ -188,7 +189,8 @@ static void handle_start(WsConn & conn, Session & s, const std::string & msg, Br
 
     std::lock_guard<std::mutex> lock(s.mu);
     s.instruction = g.instruction;
-    s.budget = (int) json_num(msg, "split_chars", 600);
+    s.budget = (int) json_num(msg, "split_chars", split_chars);
+    // streaming drains sentence by sentence, so it always needs a real budget to aim at
     if (s.budget <= 0) s.budget = 600;
     s.gen.begin(model, codec, g);
     s.started = true;
@@ -199,7 +201,7 @@ static void handle_start(WsConn & conn, Session & s, const std::string & msg, Br
 }
 
 void ws_connection(WsConn & conn, BreezeModel & model, MimiCodec & codec, VoiceStore & store,
-                   std::mutex & gpu, int chunk_first, int chunk_max) {
+                   std::mutex & gpu, int chunk_first, int chunk_max, int split_chars) {
     Session s;
     std::thread worker([&] { speaker(conn, s, gpu); });
     event(conn, "ready", "\"sample_rate\":24000,\"format\":\"s16le\"");
@@ -211,7 +213,7 @@ void ws_connection(WsConn & conn, BreezeModel & model, MimiCodec & codec, VoiceS
         const std::string type = json_str(msg, "type");
 
         if (type == "start") {
-            handle_start(conn, s, msg, model, codec, store, chunk_first, chunk_max);
+            handle_start(conn, s, msg, model, codec, store, chunk_first, chunk_max, split_chars);
             continue;
         }
         if (!s.started) {

@@ -15,6 +15,7 @@ struct ServerOptions {
     int ws_port = 0; // 0 puts it on port + 1, negative turns it off
     int chunk_first = 4;
     int chunk_max = 25;
+    int split_chars = 600; // 0 keeps long text in a single pass
 };
 
 int run_server(const ServerOptions & opts);

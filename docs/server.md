@@ -21,7 +21,7 @@ changes and interruption. It is documented in [websocket.md](websocket.md).
 ```
 breeze-server <model.gguf> [--host H] [--port P] [--webui] [--cpu]
                            [--chunk-first N] [--chunk-max N] [--verbose]
-                           [--voices-dir PATH] [--ws-port P]
+                           [--voices-dir PATH] [--ws-port P] [--split-chars N]
 ```
 
 | Flag | Default | Meaning |
@@ -35,6 +35,7 @@ breeze-server <model.gguf> [--host H] [--port P] [--webui] [--cpu]
 | `--verbose` | off | Add a per stage timing breakdown after each request. |
 | `--voices-dir` | `voices` | Folder of saved `.breeze` voices to load at startup. See [voices.md](voices.md). |
 | `--ws-port` | HTTP port + 1 | Port for streaming sessions. `-1` disables it. See [websocket.md](websocket.md). |
+| `--split-chars` | `600` | Default length long text is broken up at. `0` sends the whole thing through in one pass. A request can still override it. |
 
 ```
 breeze-server breeze-tts-2-q4_k.gguf --port 8137 --webui
@@ -193,7 +194,7 @@ Accepts `multipart/form-data` (needed for the reference audio upload) or
 | `top_k` | int | model default | Sampling top-k. `0` keeps the model default. |
 | `top_p` | float | model default | Sampling top-p. `0` keeps the model default. |
 | `repetition_penalty` | float | model default | Repetition penalty. `0` keeps the model default. |
-| `split_chars` | int | `600` | Long text is split on sentence boundaries into pieces of about this size and generated one at a time. `0` generates in one pass. |
+| `split_chars` | int | `--split-chars` | Long text is split on sentence boundaries into pieces of about this size and generated one at a time. `0` generates in one pass. |
 | `max_new_tokens` | int | model default | Frame cap per piece, 12.5 frames per second. `0` uses the model default of 750. |
 
 Every sampling field treats `0` as "use the model default", so leaving them out
@@ -203,7 +204,8 @@ There is no length limit on `text`. Anything past the budget is split and
 generated piece by piece, each conditioned on the first so the voice does not
 change partway. Generating minutes in a single pass is what `split_chars 0`
 does, and the model loses track of the text well before it runs out of frames,
-so leave splitting on unless you have a reason not to.
+so leave splitting on unless you have a reason not to. Starting the server with
+`--split-chars 0` turns it off for every request that does not set its own.
 
 ### Response
 

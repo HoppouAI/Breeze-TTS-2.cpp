@@ -81,7 +81,9 @@ it streams produces one piece per sentence with no extra work.
 
 If the buffer grows past `split_chars` without a sentence ending, it breaks on a
 space instead, so text with no punctuation still gets spoken. `flush` forces
-whatever is waiting.
+whatever is waiting. It defaults to the server's `--split-chars`, but unlike the
+HTTP endpoint it cannot be turned off, since draining needs a size to aim at.
+`0` falls back to 600 here.
 
 While there is no reference clip, the opening piece doubles as the reference for
 everything after it, so it is capped near a normal clip length. A long first
