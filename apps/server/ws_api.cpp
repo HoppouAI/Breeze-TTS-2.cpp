@@ -112,6 +112,7 @@ struct Session {
     bool started = false;
     bool ending = false;
     bool quit = false;
+    bool speaking = false;
     std::atomic<bool> cancel{false};
 };
 
@@ -127,19 +128,21 @@ static void speaker(WsConn & conn, Session & s, std::mutex & gpu) {
         std::string piece;
         {
             std::unique_lock<std::mutex> lock(s.mu);
+            s.speaking = false;
             s.cv.wait(lock, [&] { return s.quit || !s.queue.empty(); });
             if (s.quit) return;
             piece = s.queue.front();
             s.queue.pop_front();
+            s.speaking = true;
         }
-        if (s.cancel) continue;
+        if (s.cancel) { s.cancel = false; continue; }
 
         std::unique_lock<std::mutex> hold(gpu, std::try_to_lock);
         if (!hold) {
             event(conn, "queued");
             hold.lock();
         }
-        if (s.cancel) continue;
+        if (s.cancel) { s.cancel = false; continue; }
 
         {
             std::lock_guard<std::mutex> lock(s.mu);
@@ -237,11 +240,13 @@ void ws_connection(WsConn & conn, BreezeModel & model, MimiCodec & codec, VoiceS
             lock.unlock();
             s.cv.notify_one();
         } else if (type == "cancel") {
-            s.cancel = true;
             std::lock_guard<std::mutex> lock(s.mu);
             s.queue.clear();
             s.buffer.clear();
             s.ending = false;
+            // only latch it while something is actually being spoken, otherwise the flag
+            // sits true and swallows whatever gets sent next
+            s.cancel = s.speaking;
         } else {
             event(conn, "error", "\"message\":\"unknown type\"");
         }
