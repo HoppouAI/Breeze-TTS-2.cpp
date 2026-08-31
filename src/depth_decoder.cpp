@@ -2,6 +2,7 @@
 #include "breeze/sampling.h"
 
 #include <cmath>
+#include <stdexcept>
 #include <string>
 
 namespace breeze {
@@ -27,11 +28,29 @@ static std::vector<float> llama3_freq_factors(const DepthConfig & c) {
     return ff;
 }
 
+static void check_shape(ggml_tensor * t, const std::string & name,
+                        int64_t n0, int64_t n1, int64_t n2 = -1) {
+    if (t->ne[0] == n0 && t->ne[1] == n1 && (n2 < 0 || t->ne[2] == n2)) return;
+    throw std::runtime_error(
+        name + " is [" + std::to_string(t->ne[0]) + ", " + std::to_string(t->ne[1]) + ", " +
+        std::to_string(t->ne[2]) + "], expected [" + std::to_string(n0) + ", " + std::to_string(n1) +
+        ", " + (n2 < 0 ? std::string("any") : std::to_string(n2)) + "]");
+}
+
 void DepthRunner::init(BreezeModel & m, int n_branches) {
     n_branch = n_branches;
-    kv.init(m.backend, m.cfg.dd.n_layer, m.cfg.dd.head_dim, m.cfg.dd.n_kv_head,
-            m.cfg.num_codebooks + 1, n_branches);
-    freq_factors = llama3_freq_factors(m.cfg.dd);
+    const DepthConfig & c = m.cfg.dd;
+    const int nc = m.cfg.num_codebooks;
+    const int vs = m.cfg.audio_vocab_size;
+
+    // the depth graph slices into these by codebook, so a gguf built for a different codebook or
+    // vocab count reads off the end and comes out as noise instead of failing
+    check_shape(m.w("dd.in_proj.weight"), "dd.in_proj.weight", m.cfg.hidden_size, c.hidden);
+    check_shape(m.w("audio_embd.weight"), "audio_embd.weight", m.cfg.hidden_size, (int64_t) nc * vs);
+    check_shape(m.w("dd.codebooks_head.weight"), "dd.codebooks_head.weight", c.hidden, vs, nc - 1);
+
+    kv.init(m.backend, c.n_layer, c.head_dim, c.n_kv_head, nc + 1, n_branches);
+    freq_factors = llama3_freq_factors(c);
 }
 
 void DepthRunner::free() {
