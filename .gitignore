@@ -57,3 +57,6 @@ build-cuda/
 
 # saved reference voices are local data
 voices/
+/.agents
+/.claude
+skills-lock.json
