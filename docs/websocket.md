@@ -36,7 +36,7 @@ the rate given in the `ready` message, exactly like the HTTP body.
 | `start` | `voice_id`, `instruction`, `ref_text`, `cfg_scale`, `seed`, `temperature`, `top_k`, `split_chars` | Opens a session. Encodes the reference once for all of it. |
 | `text` | `text` | Adds text. Whole sentences are spoken as they complete, the rest waits. |
 | `flush` | `text` | Speaks what is buffered even without a sentence ending. |
-| `instruction` | `instruction` | Changes delivery from the next piece onwards. |
+| `instruction` | `instruction` | Changes delivery for every piece queued after it. |
 | `cancel` | | Stops mid sentence and throws away anything buffered. |
 | `end` | `text` | Adds any last text, speaks everything, then reports `done`. |
 
@@ -52,7 +52,7 @@ the rate given in the `ready` message, exactly like the HTTP body.
 | `started` | `voice_id` | Session is open. |
 | `speaking` | `text` | The piece about to be generated. |
 | `queued` | | Another connection holds the GPU. Waiting, not refused. |
-| `instruction_set` | | The new delivery is in effect from the next piece. |
+| `instruction_set` | | The new delivery applies to text sent from here on. |
 | `cancelled` | | Generation was interrupted. |
 | `done` | | Everything buffered has been spoken. |
 | `error` | `message` | Something was wrong with the request. |
@@ -91,8 +91,12 @@ piece makes the model start skipping sentences later.
 
 ## Changing delivery partway
 
-An `instruction` message applies from the **next** piece. Whatever is already
-being generated finishes as it was, because a piece is generated as one unit.
+An `instruction` message applies to every piece queued **after** it. Each piece
+remembers the instruction that was live when it was queued, so pieces already
+waiting, and the one being generated, finish with the delivery they were sent
+under. That means a direction dropped between two sentences lands on exactly the
+sentence that follows it, even when text is arriving faster than the GPU is
+speaking it and the queue is several pieces deep.
 
 The effect is real but it is a nudge, not a transformation. Same sentence, same
 seed, measured on the isolated piece:
