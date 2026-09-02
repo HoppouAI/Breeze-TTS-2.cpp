@@ -35,7 +35,7 @@ the rate given in the `ready` message, exactly like the HTTP body.
 | --- | --- | --- |
 | `start` | `voice_id`, `instruction`, `ref_text`, `cfg_scale`, `seed`, `temperature`, `top_k`, `split_chars` | Opens a session. Encodes the reference once for all of it. |
 | `text` | `text` | Adds text. Whole sentences are spoken as they complete, the rest waits. |
-| `flush` | `text` | Speaks what is buffered even without a sentence ending. |
+| `flush` | `text` | Speaks everything buffered plus this text as one piece, sentence ending or not. Use it when the client has already split the text itself. |
 | `instruction` | `instruction` | Changes delivery for every piece queued after it. |
 | `cancel` | | Stops mid sentence and throws away anything buffered. |
 | `end` | `text` | Adds any last text, speaks everything, then reports `done`. |

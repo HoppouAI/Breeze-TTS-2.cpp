@@ -87,7 +87,9 @@ static std::vector<std::string> drain(std::string & buf, int budget, bool force)
         const size_t sp = buf.rfind(' ');
         if (sp != std::string::npos) cut = sp + 1;
     }
-    if (force && !cut) cut = buf.size();
+    // flush and end mean all of it, otherwise a tail after the last full stop (a closing quote,
+    // an unfinished clause) sits in the buffer and gets glued onto the front of the next message
+    if (force) cut = buf.size();
     if (!cut) return out;
 
     std::string ready = buf.substr(0, cut);
