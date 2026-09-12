@@ -188,8 +188,13 @@ static bool generate_chunk(BreezeModel & m, MimiCodec & codec, const GenRequest 
 
         auto tb = clock_now();
         std::vector<float> ae = audio_embed_forward(m, frame, 1);
-        o_c = backbone_run(m, st_c, ae, 1);
-        if (use_cfg) o_u = backbone_run(m, st_u, ae, 1);
+        if (use_cfg) {
+            auto pair = backbone_run_cfg(m, st_c, st_u, ae);
+            o_c = std::move(pair[0]);
+            o_u = std::move(pair[1]);
+        } else {
+            o_c = backbone_run(m, st_c, ae, 1);
+        }
         tm.backbone += since(tb);
         comb = combine_logits(o_c.logits, o_u.logits, use_cfg, req.cfg_scale);
         cb0 = sample_token(comb, bp, rng, &hist, &suppress);
@@ -346,8 +351,13 @@ std::vector<float> convert_voice(BreezeModel & m, MimiCodec & codec, const std::
         const int * from = opt.feed_source ? &src_codes[(size_t) t * nc] : &out[(size_t) t * nc];
         std::vector<int> frame(from, from + nc);
         std::vector<float> ae = audio_embed_forward(m, frame, 1);
-        o_c = backbone_run(m, st_c, ae, 1);
-        if (use_cfg) o_u = backbone_run(m, st_u, ae, 1);
+        if (use_cfg) {
+            auto pair = backbone_run_cfg(m, st_c, st_u, ae);
+            o_c = std::move(pair[0]);
+            o_u = std::move(pair[1]);
+        } else {
+            o_c = backbone_run(m, st_c, ae, 1);
+        }
         if (t % 25 == 0) { printf("\rconverting %d/%d frames", t, src_T); fflush(stdout); }
     }
     printf("\rconverted %d frames        \n", src_T);

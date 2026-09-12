@@ -1,4 +1,5 @@
 #include "breeze/depth_decoder.h"
+#include "breeze/backbone.h"
 
 #include <cmath>
 #include <cstdio>
@@ -54,7 +55,7 @@ struct Fixture {
     BreezeModel model;
     ~Fixture() { model.free(); }
 
-    void init(bool gpu) {
+    void init(bool gpu, bool quantized) {
         auto & m = model;
         m.backend.init(gpu);
         if (gpu && !m.backend.is_gpu) return;
@@ -66,12 +67,19 @@ struct Fixture {
         m.cfg.dd.n_kv_head = 1;
         m.cfg.dd.head_dim = 32;
         m.cfg.dd.ffn = 128;
+        m.cfg.bb.hidden = 128;
+        m.cfg.bb.n_layer = 2;
+        m.cfg.bb.n_head = 4;
+        m.cfg.bb.n_kv_head = 2;
+        m.cfg.bb.head_dim = 32;
+        m.cfg.bb.ffn = 128;
         ggml_init_params params{ggml_tensor_overhead() * 64, nullptr, true};
         m.gg.meta = ggml_init(params);
         require(m.gg.meta != nullptr, "weight context allocation failed");
         std::vector<ggml_tensor *> weights;
         auto add = [&](const std::string & name, int n0, int n1 = 1, int n2 = 1) {
-            auto * t = ggml_new_tensor_3d(m.gg.meta, GGML_TYPE_F32, n0, n1, n2);
+            const auto type = quantized && n1 > 1 ? GGML_TYPE_Q8_0 : GGML_TYPE_F32;
+            auto * t = ggml_new_tensor_3d(m.gg.meta, type, n0, n1, n2);
             ggml_set_name(t, name.c_str());
             m.gg.tensors.emplace(name, t);
             weights.push_back(t);
@@ -92,6 +100,22 @@ struct Fixture {
             add(p + ".ffn_up.weight", 64, 128);
             add(p + ".ffn_down.weight", 128, 64);
         }
+        add("bb.output_norm.weight", 128);
+        add("bb.lm_head.weight", 128, 33);
+        for (int il = 0; il < 2; il++) {
+            const std::string p = "bb.blk." + std::to_string(il);
+            add(p + ".attn_norm.weight", 128);
+            add(p + ".attn_q.weight", 128, 128);
+            add(p + ".attn_k.weight", 128, 64);
+            add(p + ".attn_v.weight", 128, 64);
+            add(p + ".attn_q_norm.weight", 32);
+            add(p + ".attn_k_norm.weight", 32);
+            add(p + ".attn_output.weight", 128, 128);
+            add(p + ".ffn_norm.weight", 128);
+            add(p + ".ffn_gate.weight", 128, 128);
+            add(p + ".ffn_up.weight", 128, 128);
+            add(p + ".ffn_down.weight", 128, 128);
+        }
         m.gg.buffer = ggml_backend_alloc_ctx_tensors(m.gg.meta, m.backend.backend);
         require(m.gg.buffer != nullptr, "weight buffer allocation failed");
         std::mt19937 rng(17);
@@ -100,7 +124,13 @@ struct Fixture {
             const bool norm = std::string(t->name).find("norm.weight") != std::string::npos;
             for (float & v : data)
                 v = norm ? 1.0f : (static_cast<int>(rng() % 2001) - 1000) * 0.0001f;
-            ggml_backend_tensor_set(t, data.data(), 0, data.size() * sizeof(float));
+            if (ggml_is_quantized(t->type)) {
+                std::vector<uint8_t> packed(ggml_nbytes(t));
+                ggml_quantize_chunk(t->type, data.data(), packed.data(), 0, ggml_nrows(t), t->ne[0], nullptr);
+                ggml_backend_tensor_set(t, packed.data(), 0, packed.size());
+            } else {
+                ggml_backend_tensor_set(t, data.data(), 0, data.size() * sizeof(float));
+            }
         }
     }
 };
@@ -140,19 +170,85 @@ static void test_depth(BreezeModel & m) {
     require(cached.steps.empty() && !cached.kv.buffer, "depth cache was not released");
 }
 
+static void test_backbone(BreezeModel & m) {
+    std::mt19937 rng(123);
+    auto embeds = [&](int n) {
+        std::vector<float> values(n * m.cfg.hidden_size);
+        for (auto & x : values) x = (static_cast<int>(rng() % 201) - 100) * 0.01f;
+        return values;
+    };
+    for (const auto & lengths : {std::array<int, 2>{3, 7}, {7, 3}, {4, 4}}) {
+        BackboneState paired[2], separate[2];
+        for (int b = 0; b < 2; b++) {
+            paired[b].init(m, 32);
+            separate[b].init(m, 32);
+            const auto prompt = embeds(lengths[b]);
+            backbone_run(m, paired[b], prompt, lengths[b]);
+            backbone_run(m, separate[b], prompt, lengths[b]);
+        }
+        for (int step = 0; step < 4; step++) {
+            const auto input = embeds(1);
+            const auto actual = backbone_run_cfg(m, paired[0], paired[1], input);
+            for (int b = 0; b < 2; b++) {
+                const auto expected = backbone_run(m, separate[b], input, 1);
+                close(actual[b].hidden, expected.hidden);
+                close(actual[b].logits, expected.logits);
+                require(paired[b].pos == separate[b].pos, "CFG position differs");
+                for (int il = 0; il < m.cfg.bb.n_layer; il++) {
+                    const size_t count = paired[b].pos * m.cfg.bb.head_dim * m.cfg.bb.n_kv_head;
+                    for (int value = 0; value < 2; value++) {
+                        auto * a = value ? paired[b].kv.v[il] : paired[b].kv.k[il];
+                        auto * e = value ? separate[b].kv.v[il] : separate[b].kv.k[il];
+                        std::vector<float> av(count), ev(count);
+                        ggml_backend_tensor_get(a, av.data(), 0, count * sizeof(float));
+                        ggml_backend_tensor_get(e, ev.data(), 0, count * sizeof(float));
+                        close(av, ev);
+                    }
+                }
+            }
+        }
+        for (int b = 0; b < 2; b++) { paired[b].free(); separate[b].free(); }
+    }
+}
+
+static void test_swiglu(BreezeModel & m) {
+    auto * gate = m.w("dd.blk.0.ffn_gate.weight");
+    auto * up = m.w("dd.blk.0.ffn_up.weight");
+    auto * down = m.w("dd.blk.0.ffn_down.weight");
+    for (int n : {1, 2, 4}) {
+        std::vector<float> input(m.cfg.dd.hidden * n);
+        for (size_t i = 0; i < input.size(); i++) input[i] = (static_cast<int>(i % 127) - 63) * 0.125f;
+        Graph fused(128), separate(128);
+        auto * x = fused.input_f32(input, m.cfg.dd.hidden, n);
+        auto * actual = swiglu_ffn(fused.ctx, x, gate, up, down);
+        fused.compute(m.backend, actual);
+        const auto values = tensor_to_f32(actual);
+        x = separate.input_f32(input, m.cfg.dd.hidden, n);
+        auto * g = ggml_silu(separate.ctx, ggml_mul_mat(separate.ctx, gate, x));
+        auto * u = ggml_mul_mat(separate.ctx, up, x);
+        auto * expected = ggml_mul_mat(separate.ctx, down, ggml_mul(separate.ctx, g, u));
+        separate.compute(m.backend, expected);
+        close(values, tensor_to_f32(expected));
+    }
+}
+
 int main(int argc, char ** argv) {
     try {
         const bool gpu = argc > 1 && std::string(argv[1]) == "--gpu";
-        Fixture fixture;
-        fixture.init(gpu);
-        if (gpu && !fixture.model.backend.is_gpu) {
-            std::puts("no GPU backend available");
-            return 77;
+        for (bool quantized : {false, true}) {
+            Fixture fixture;
+            fixture.init(gpu, quantized);
+            if (gpu && !fixture.model.backend.is_gpu) {
+                std::puts("no GPU backend available");
+                return 77;
+            }
+            std::printf("testing %s with %s weights\n", fixture.model.backend.name(), quantized ? "Q8_0" : "F32");
+            test_graph(fixture.model.backend);
+            test_depth(fixture.model);
+            test_backbone(fixture.model);
+            test_swiglu(fixture.model);
         }
-        std::printf("testing %s\n", fixture.model.backend.name());
-        test_graph(fixture.model.backend);
-        test_depth(fixture.model);
-        std::puts("graph replay and depth cache tests passed");
+        std::puts("graph replay, depth cache, CFG backbone and SwiGLU tests passed");
         return 0;
     } catch (const std::exception & e) {
         std::fprintf(stderr, "%s\n", e.what());
