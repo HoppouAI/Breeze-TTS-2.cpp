@@ -15,6 +15,7 @@ option(BREEZE_CUDA "Build ggml with the CUDA backend" OFF)
 option(BREEZE_BUILD_CLI "Build the command line app" ON)
 option(BREEZE_BUILD_SERVER "Build the HTTP server" ON)
 option(BREEZE_BUILD_SHARED "Build the shared C library" ON)
+option(BREEZE_BUILD_TESTS "Build inference regression tests" OFF)
 
 if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/CMakeLists.txt")
     message(FATAL_ERROR "third_party/ggml is missing. Run: git submodule update --init --recursive")
@@ -57,6 +58,15 @@ target_link_libraries(breeze_core PUBLIC ggml)
 # make mingw binaries self contained so they do not pick up stray runtime DLLs
 if(MINGW)
     add_link_options(-static-libgcc -static-libstdc++ -static)
+endif()
+
+if(BREEZE_BUILD_TESTS)
+    enable_testing()
+    add_executable(breeze-test-depth tests/depth_replay.cpp)
+    target_link_libraries(breeze-test-depth PRIVATE breeze_core)
+    add_test(NAME depth-replay-cpu COMMAND breeze-test-depth)
+    add_test(NAME depth-replay-gpu COMMAND breeze-test-depth --gpu)
+    set_tests_properties(depth-replay-gpu PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 set(BREEZE_WEBUI_HEADER ${CMAKE_CURRENT_BINARY_DIR}/generated/breeze_webui_assets.h)

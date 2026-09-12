@@ -38,22 +38,24 @@ static void check_shape(ggml_tensor * t, const std::string & name,
 }
 
 void DepthRunner::init(BreezeModel & m, int n_branches) {
+    free();
     n_branch = n_branches;
     const DepthConfig & c = m.cfg.dd;
     const int nc = m.cfg.num_codebooks;
     const int vs = m.cfg.audio_vocab_size;
 
-    // the depth graph slices into these by codebook, so a gguf built for a different codebook or
-    // vocab count reads off the end and comes out as noise instead of failing
+    // codebook slices require the checkpoint shapes to match the config
     check_shape(m.w("dd.in_proj.weight"), "dd.in_proj.weight", m.cfg.hidden_size, c.hidden);
     check_shape(m.w("audio_embd.weight"), "audio_embd.weight", m.cfg.hidden_size, (int64_t) nc * vs);
     check_shape(m.w("dd.codebooks_head.weight"), "dd.codebooks_head.weight", c.hidden, vs, nc - 1);
 
     kv.init(m.backend, c.n_layer, c.head_dim, c.n_kv_head, nc + 1, n_branches);
     freq_factors = llama3_freq_factors(c);
+    steps.resize(nc - 1);
 }
 
 void DepthRunner::free() {
+    steps.clear();
     kv.free();
 }
 
@@ -84,27 +86,21 @@ static ggml_tensor * dd_layer(ggml_context * ctx, BreezeModel & m, Graph & g, KV
     return ggml_add(ctx, res, h);
 }
 
-// runs one depth position for every CFG branch at once and returns the per branch logits,
-// laid out branch major so branch b starts at b * vocab
-static std::vector<float> depth_step(BreezeModel & m, DepthRunner & r, int start,
-                                     const std::vector<std::vector<float>> * hiddens,
-                                     int audio_code, int head_idx) {
+static std::unique_ptr<DepthStep> build_depth_step(BreezeModel & m, DepthRunner & r, int head_idx) {
     const DepthConfig & c = m.cfg.dd;
     const int nb = r.n_branch;
-    const int n_pos = hiddens ? 2 : 1;
+    const int start = head_idx == 0 ? 0 : head_idx + 1;
+    const int n_pos = head_idx == 0 ? 2 : 1;
     const int n_tok = n_pos * nb;
     const int total = (start + n_pos) * nb;
-    Graph g(2048);
+    auto step = std::make_unique<DepthStep>();
+    Graph & g = step->graph;
 
-    std::vector<int32_t> idx(nb, audio_code);
-    ggml_tensor * aud = g.input_i32(idx, nb);
-    ggml_tensor * embed = ggml_get_rows(g.ctx, m.w("audio_embd.weight"), aud); // [2048, nb]
-    if (hiddens) {
-        std::vector<float> flat;
-        flat.reserve((size_t) nb * m.cfg.hidden_size);
-        for (const auto & h : *hiddens) flat.insert(flat.end(), h.begin(), h.end());
-        ggml_tensor * h0 = g.input_f32(flat, m.cfg.hidden_size, nb);
-        embed = ggml_concat(g.ctx, h0, embed, 1); // [2048, 2*nb], position major
+    step->audio = g.input_i32(std::vector<int32_t>(nb), nb);
+    ggml_tensor * embed = ggml_get_rows(g.ctx, m.w("audio_embd.weight"), step->audio);
+    if (head_idx == 0) {
+        step->hidden = g.input_f32(std::vector<float>((size_t) nb * m.cfg.hidden_size), m.cfg.hidden_size, nb);
+        embed = ggml_concat(g.ctx, step->hidden, embed, 1);
     }
     ggml_tensor * x = linear(g.ctx, m.w("dd.in_proj.weight"), embed); // [1024, n_tok]
 
@@ -123,9 +119,9 @@ static std::vector<float> depth_step(BreezeModel & m, DepthRunner & r, int start
                                                        (size_t) (n_tok - nb) * x->nb[1]));
     ggml_tensor * head = m.w("dd.codebooks_head.weight");
     ggml_tensor * hw = ggml_view_2d(g.ctx, head, head->ne[0], head->ne[1], head->nb[1], (size_t) head_idx * head->nb[2]);
-    ggml_tensor * logits = ggml_mul_mat(g.ctx, hw, last); // [vocab, nb]
-    g.compute(m.backend, logits);
-    return tensor_to_f32(logits);
+    step->logits = ggml_mul_mat(g.ctx, hw, last);
+    g.prepare(m.backend, step->logits);
+    return step;
 }
 
 std::vector<int> DepthRunner::run(BreezeModel & m, const std::vector<std::vector<float>> & hiddens,
@@ -141,12 +137,22 @@ std::vector<int> DepthRunner::run(BreezeModel & m, const std::vector<std::vector
     sp.top_p = m.cfg.depth_top_p;
     if (sp_in) sp = *sp_in;
 
+    std::vector<int32_t> idx(n_branch);
     std::vector<int> codes = { cb0 };
     for (int j = 1; j < nc; j++) {
         const int head_idx = j - 1;
-        std::vector<float> out = j == 1
-            ? depth_step(m, *this, 0, &hiddens, cb0, head_idx)
-            : depth_step(m, *this, j, nullptr, codes[head_idx] + head_idx * vs, head_idx);
+        if (!steps[head_idx]) steps[head_idx] = build_depth_step(m, *this, head_idx);
+        DepthStep & step = *steps[head_idx];
+        for (int b = 0; b < n_branch; b++) idx[b] = codes[head_idx] + head_idx * vs;
+        ggml_backend_tensor_set(step.audio, idx.data(), 0, idx.size() * sizeof(int32_t));
+        if (step.hidden) {
+            for (int b = 0; b < n_branch; b++)
+                ggml_backend_tensor_set(step.hidden, hiddens[b].data(),
+                                        (size_t) b * m.cfg.hidden_size * sizeof(float),
+                                        (size_t) m.cfg.hidden_size * sizeof(float));
+        }
+        step.graph.replay(m.backend);
+        std::vector<float> out = tensor_to_f32(step.logits);
 
         const int vocab = (int) out.size() / n_branch;
         std::vector<float> logits(out.begin(), out.begin() + vocab);
