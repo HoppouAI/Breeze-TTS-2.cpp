@@ -35,21 +35,26 @@ struct KVCache {
     void free();
 };
 
-// a single throwaway forward graph; input host data is stashed and uploaded after allocation
+// inputs are uploaded after allocation; prepared graphs own their scratch buffers
 struct Graph {
     ggml_context * ctx = nullptr;
     ggml_cgraph * gf = nullptr;
+    ggml_gallocr_t alloc = nullptr;
     std::vector<std::pair<ggml_tensor *, std::vector<uint8_t>>> pending;
     std::vector<ggml_tensor *> extra_roots;
 
     explicit Graph(size_t n_nodes = GGML_DEFAULT_GRAPH_SIZE);
     ~Graph();
+    Graph(const Graph &) = delete;
+    Graph & operator=(const Graph &) = delete;
 
     ggml_tensor * input_i32(const std::vector<int32_t> & data, int ne0, int ne1 = 1);
     ggml_tensor * input_f32(const std::vector<float> & data, int ne0, int ne1 = 1, int ne2 = 1);
     void write(ggml_tensor * node) { extra_roots.push_back(node); }
 
     void compute(Backend & be, ggml_tensor * out);
+    void prepare(Backend & be, ggml_tensor * out);
+    void replay(Backend & be);
 };
 
 // store cur [head_dim, n_kv_head, n] into cache at position pos; returns view over [0, pos+n)

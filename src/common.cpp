@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <stdexcept>
 
 namespace breeze {
 
@@ -62,6 +63,7 @@ Graph::Graph(size_t n_nodes) {
 }
 
 Graph::~Graph() {
+    if (alloc) ggml_gallocr_free(alloc);
     if (ctx) ggml_free(ctx);
 }
 
@@ -87,11 +89,30 @@ void Graph::compute(Backend & be, ggml_tensor * out) {
     ggml_set_output(out);
     for (ggml_tensor * r : extra_roots) ggml_build_forward_expand(gf, r);
     ggml_build_forward_expand(gf, out);
-    ggml_gallocr_alloc_graph(be.alloc, gf);
+    if (!ggml_gallocr_alloc_graph(be.alloc, gf)) throw std::runtime_error("could not allocate inference graph");
     for (auto & pr : pending) {
         ggml_backend_tensor_set(pr.first, pr.second.data(), 0, pr.second.size());
     }
-    ggml_backend_graph_compute(be.backend, gf);
+    replay(be);
+}
+
+void Graph::prepare(Backend & be, ggml_tensor * out) {
+    if (alloc) throw std::logic_error("inference graph is already prepared");
+    ggml_set_output(out);
+    // constant inputs must survive in-place operations between replays
+    for (auto & pr : pending) ggml_set_output(pr.first);
+    for (ggml_tensor * r : extra_roots) ggml_build_forward_expand(gf, r);
+    ggml_build_forward_expand(gf, out);
+    alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(be.backend));
+    if (!ggml_gallocr_alloc_graph(alloc, gf)) throw std::runtime_error("could not allocate cached inference graph");
+    for (auto & pr : pending)
+        ggml_backend_tensor_set(pr.first, pr.second.data(), 0, pr.second.size());
+    pending.clear();
+}
+
+void Graph::replay(Backend & be) {
+    if (ggml_backend_graph_compute(be.backend, gf) != GGML_STATUS_SUCCESS)
+        throw std::runtime_error("inference graph execution failed");
 }
 
 ggml_tensor * cache_append(ggml_context * ctx, Graph & g, ggml_tensor * cache, ggml_tensor * cur, int pos) {
