@@ -89,7 +89,11 @@ void Graph::compute(Backend & be, ggml_tensor * out) {
     ggml_set_output(out);
     for (ggml_tensor * r : extra_roots) ggml_build_forward_expand(gf, r);
     ggml_build_forward_expand(gf, out);
-    if (!ggml_gallocr_alloc_graph(be.alloc, gf)) throw std::runtime_error("could not allocate inference graph");
+    if (!ggml_gallocr_alloc_graph(be.alloc, gf)) {
+        ggml_gallocr_free(be.alloc);
+        be.alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(be.backend));
+        throw std::runtime_error("could not allocate inference graph");
+    }
     for (auto & pr : pending) {
         ggml_backend_tensor_set(pr.first, pr.second.data(), 0, pr.second.size());
     }
@@ -139,9 +143,9 @@ ggml_tensor * linear(ggml_context * ctx, ggml_tensor * w, ggml_tensor * x) {
 
 ggml_tensor * swiglu_ffn(ggml_context * ctx, ggml_tensor * x, ggml_tensor * gate,
                          ggml_tensor * up, ggml_tensor * down) {
-    ggml_tensor * g = ggml_silu(ctx, ggml_mul_mat(ctx, gate, x));
+    ggml_tensor * g = ggml_mul_mat(ctx, gate, x);
     ggml_tensor * u = ggml_mul_mat(ctx, up, x);
-    return ggml_mul_mat(ctx, down, ggml_mul(ctx, g, u));
+    return ggml_mul_mat(ctx, down, ggml_swiglu_split(ctx, g, u));
 }
 
 ggml_tensor * attention(ggml_context * ctx, ggml_tensor * q, ggml_tensor * k, ggml_tensor * v,
