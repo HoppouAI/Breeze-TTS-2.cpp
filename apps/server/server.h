@@ -16,6 +16,7 @@ struct ServerOptions {
     int chunk_first = 4;
     int chunk_max = 25;
     int split_chars = 600; // 0 keeps long text in a single pass
+    std::string cors; // empty turns cors off, "*" allows any origin, otherwise a comma separated allowlist
 };
 
 int run_server(const ServerOptions & opts);
