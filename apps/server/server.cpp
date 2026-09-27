@@ -45,6 +45,22 @@ static std::string bar(double frac, int width) {
     return s;
 }
 
+// picks the Access-Control-Allow-Origin value for a request. `allowed` is "*" or a comma
+// separated allowlist, and an origin not on the list gets an empty string so no header is sent
+static std::string cors_origin(const std::string & allowed, const httplib::Request & req) {
+    if (allowed == "*") return "*";
+    const std::string origin = req.get_header_value("Origin");
+    if (origin.empty()) return "";
+    size_t start = 0;
+    while (start <= allowed.size()) {
+        size_t end = allowed.find(',', start);
+        if (end == std::string::npos) end = allowed.size();
+        if (allowed.compare(start, end - start, origin) == 0) return origin;
+        start = end + 1;
+    }
+    return "";
+}
+
 int run_server(const ServerOptions & opts) {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8); // otherwise the bar glyphs and any chinese text come out as mojibake
@@ -260,6 +276,28 @@ int run_server(const ServerOptions & opts) {
             res.set_content(breeze_webui::app_js, "application/javascript");
         });
         printf("web ui: http://%s:%d/\n", opts.host.c_str(), opts.port);
+    }
+
+    if (!opts.cors.empty()) {
+        // post routing runs on every response, including the error bodies and the chunked
+        // audio stream, so the browser sees the headers whichever way a request ends
+        svr.set_post_routing_handler([&](const httplib::Request & req, httplib::Response & res) {
+            const std::string origin = cors_origin(opts.cors, req);
+            if (origin.empty()) return;
+            res.set_header("Access-Control-Allow-Origin", origin);
+            res.set_header("Access-Control-Expose-Headers", "X-Sample-Rate, X-Sample-Format");
+            if (origin != "*") res.set_header("Vary", "Origin");
+        });
+        // preflight. the origin header comes from the hook above, so an origin that is not on
+        // the list gets a 204 without it and the browser refuses the real request
+        svr.Options(".*", [](const httplib::Request & req, httplib::Response & res) {
+            res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+            res.set_header("Access-Control-Max-Age", "86400");
+            const std::string want = req.get_header_value("Access-Control-Request-Headers");
+            if (!want.empty()) res.set_header("Access-Control-Allow-Headers", want);
+            res.status = 204;
+        });
+        printf("cors: %s\n", opts.cors == "*" ? "any origin" : opts.cors.c_str());
     }
 
     printf("listening on http://%s:%d\n", opts.host.c_str(), opts.port);

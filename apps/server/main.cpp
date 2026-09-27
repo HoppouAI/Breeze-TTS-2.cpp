@@ -11,6 +11,7 @@ int main(int argc, char ** argv) {
         printf("usage: breeze-server <model.gguf> [--host H] [--port P] [--webui] [--cpu]\n");
         printf("                     [--chunk-first N] [--chunk-max N] [--verbose]\n");
         printf("                     [--voices-dir PATH] [--ws-port P] [--split-chars N]\n");
+        printf("                     [--cors [ORIGINS]]\n");
         printf("\n");
         printf("  --chunk-first  frames in the first streamed chunk, lower starts sooner (default 4)\n");
         printf("  --chunk-max    frames the chunk ramps up to, higher is more efficient (default 25)\n");
@@ -21,6 +22,9 @@ int main(int argc, char ** argv) {
         printf("  --voices-dir   folder of saved .breeze voices to load at startup (default voices)\n");
         printf("  --ws-port      websocket port for streaming sessions, default is the http port + 1,\n");
         printf("                 -1 turns it off\n");
+        printf("  --cors         let browser pages on other origins call the api. on its own it allows\n");
+        printf("                 any origin, or give a comma separated list like\n");
+        printf("                 http://localhost:5173,https://app.example.com to allow only those\n");
         return argc < 2 ? 1 : 0;
     }
     ServerOptions opts;
@@ -37,6 +41,12 @@ int main(int argc, char ** argv) {
         else if (a == "--chunk-first" && i + 1 < argc) opts.chunk_first = atoi(argv[++i]);
         else if (a == "--chunk-max" && i + 1 < argc) opts.chunk_max = atoi(argv[++i]);
         else if (a == "--split-chars" && i + 1 < argc) opts.split_chars = atoi(argv[++i]);
+        else if (a == "--cors") {
+            // the origin list is optional. origins always start with a scheme, so anything
+            // starting with a dash is the next flag rather than a value for this one
+            opts.cors = "*";
+            if (i + 1 < argc && argv[i + 1][0] != '-') opts.cors = argv[++i];
+        }
         else { fprintf(stderr, "unknown arg: %s\n", a.c_str()); return 1; }
     }
     if (opts.split_chars < 0) opts.split_chars = 0;

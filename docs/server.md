@@ -22,6 +22,7 @@ changes and interruption. It is documented in [websocket.md](websocket.md).
 breeze-server <model.gguf> [--host H] [--port P] [--webui] [--cpu]
                            [--chunk-first N] [--chunk-max N] [--verbose]
                            [--voices-dir PATH] [--ws-port P] [--split-chars N]
+                           [--cors [ORIGINS]]
 ```
 
 | Flag | Default | Meaning |
@@ -36,6 +37,7 @@ breeze-server <model.gguf> [--host H] [--port P] [--webui] [--cpu]
 | `--voices-dir` | `voices` | Folder of saved `.breeze` voices to load at startup. See [voices.md](voices.md). |
 | `--ws-port` | HTTP port + 1 | Port for streaming sessions. `-1` disables it. See [websocket.md](websocket.md). |
 | `--split-chars` | `600` | Default length long text is broken up at. `0` sends the whole thing through in one pass. A request can still override it. |
+| `--cors` | off | Let browser pages on other origins call the API. On its own it allows any origin; give a comma separated list to allow only those. See [Cross origin requests](#cross-origin-requests). |
 
 ```
 breeze-server breeze-tts-2-q4_k.gguf --port 8137 --webui
@@ -62,6 +64,34 @@ and anything above `1.00x` is faster than playback.
 There is no authentication and no rate limiting, on either the HTTP port or the
 WebSocket one. Do not expose them directly to the internet; put them behind a
 reverse proxy that handles both.
+
+## Cross origin requests
+
+The bundled web UI is served from the same origin as the API, so it needs
+nothing. A page served from anywhere else, a Vite dev server or a separate front
+end for instance, is blocked by the browser unless the server sends CORS
+headers. It does not by default. Turn them on with `--cors`:
+
+```
+breeze-server model.gguf --cors
+breeze-server model.gguf --cors http://localhost:5173,https://app.example.com
+```
+
+On its own the flag answers every origin with `Access-Control-Allow-Origin: *`.
+With a list it reflects the request's `Origin` only when it matches an entry
+exactly, scheme and port included, and adds `Vary: Origin` so caches keep the
+answers apart. An origin that is not on the list gets no CORS headers and the
+browser refuses the response.
+
+`X-Sample-Rate` and `X-Sample-Format` are listed in
+`Access-Control-Expose-Headers`, so a cross origin page can read the sample
+rate the same way the bundled UI does. Preflight `OPTIONS` requests, which the
+browser sends before `DELETE /v1/voices/<id>`, are answered with `204` and
+cached for a day.
+
+The WebSocket port is not affected. Browsers do not apply CORS to WebSockets,
+and the socket accepts a connection from any page regardless of this flag, as
+[websocket.md](websocket.md) notes.
 
 ## Streaming without stutter
 
