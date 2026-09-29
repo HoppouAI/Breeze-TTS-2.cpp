@@ -32,15 +32,10 @@ jobs:
       - name: Build
         run: |
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF \
+            -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF \
             -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc" \
             -DCMAKE_SHARED_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
           cmake --build build -j "$(nproc)"
-
-      - name: Check
-        run: |
-          ldd build/breeze-server
-          ./build/breeze-server --help
 
       - name: Package
         id: pkg
@@ -49,6 +44,12 @@ jobs:
         run: |
           name="breeze-tts-2-${TAG:-dev}-linux-x64-vulkan"
           bash scripts/package_release.sh build "$name"
+          # check the packaged copy, the build tree rpath would hide a missing library
+          for f in "build/$name"/breeze-* "build/$name"/libbreeze.so; do
+            ldd "$f"
+            if ldd "$f" | grep -qE "not found|libggml|/build/"; then echo "$f is not self contained"; exit 1; fi
+          done
+          "build/$name/breeze-server" --help
           tar -C build -czf "$name.tar.gz" "$name"
           echo "name=$name" >> "$GITHUB_OUTPUT"
 
