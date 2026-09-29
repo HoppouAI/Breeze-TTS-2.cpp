@@ -218,6 +218,10 @@ curl -X POST http://127.0.0.1:8080/v1/audio/speech \
 Use `--form-string` for text fields, not `-F`. A value starting with `(` makes `curl` build a
 multipart group instead of sending the text, which bites the moment you use a vocal event tag.
 
+The same endpoint takes OpenAI style JSON too, so SillyTavern and the OpenAI SDKs can use it as a
+drop in TTS provider, with MP3, WAV or PCM streamed back and server sent events if you ask for them.
+See [docs/server.md](docs/server.md#openai-compatible-requests).
+
 A WebSocket server also comes up on the HTTP port plus one. It takes text incrementally, streams audio
 back as it is produced, and supports changing the delivery instruction or cancelling mid sentence,
 which is what you want when driving it from a chat model. See [docs/websocket.md](docs/websocket.md).
@@ -256,6 +260,7 @@ the only external dependency.
 
 ## License
 
-Source code is [Apache 2.0](LICENSE). The Breeze TTS 2 model weights are governed by the BreezeBlue
+Source code is [Apache 2.0](LICENSE). The MP3 encoder in `third_party/shine` is a separate submodule under the
+LGPL 2.0. The Breeze TTS 2 model weights are governed by the BreezeBlue
 Research and Non-Commercial License. You are responsible for complying with the weight license and for
 obtaining consent for any reference audio or voices you use.
