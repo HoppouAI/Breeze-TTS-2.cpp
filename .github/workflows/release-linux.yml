@@ -1,0 +1,65 @@
+name: linux release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "release tag to attach the build to, leave empty to just build it"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  linux-vulkan:
+    # 22.04 keeps the glibc floor low enough for most distros still in support
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Dependencies
+        run: |
+          wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo apt-key add -
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential ninja-build vulkan-sdk
+
+      - name: Build
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF \
+            -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
+          cmake --build build -j "$(nproc)"
+
+      - name: Check
+        run: |
+          ldd build/breeze-server
+          ./build/breeze-server --help
+
+      - name: Package
+        id: pkg
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          name="breeze-tts-2-${TAG:-dev}-linux-x64-vulkan"
+          bash scripts/package_release.sh build "$name"
+          tar -C build -czf "$name.tar.gz" "$name"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: ${{ steps.pkg.outputs.name }}.tar.gz
+
+      - name: Attach to release
+        if: ${{ github.event.release.tag_name || inputs.tag }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release upload "$TAG" "${{ steps.pkg.outputs.name }}.tar.gz" --clobber
