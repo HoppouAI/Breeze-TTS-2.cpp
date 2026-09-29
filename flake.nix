@@ -38,9 +38,9 @@
         breeze-build = pkgs.writeShellScriptBin "breeze-build" ''
           set -euo pipefail
 
-          # Ensure the ggml submodule is present
-          if [ ! -f "third_party/ggml/CMakeLists.txt" ]; then
-            echo "Fetching ggml submodule..."
+          # Ensure the ggml and shine submodules are present
+          if [ ! -f "third_party/ggml/CMakeLists.txt" ] || [ ! -f "third_party/shine/src/lib/layer3.c" ]; then
+            echo "Fetching submodules..."
             git submodule update --init --recursive
           fi
 
