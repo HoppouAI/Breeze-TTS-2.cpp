@@ -54,6 +54,21 @@ https://github.com/user-attachments/assets/b63e4664-497f-4bac-b9e2-50bf571df30a
 | **Voice direction** | A reference clip plus an instruction | That voice, steered in tone or pace |
 | **Voice conversion** | A recording to respeak, and a target voice | The same performance in a different voice |
 
+## Download
+
+Prebuilt Vulkan builds for Windows and Linux (x64) are on the
+[releases page](https://github.com/HoppouAI/Breeze-TTS-2.cpp/releases). They run on NVIDIA, AMD and
+Intel GPUs with nothing else to install beyond a current GPU driver, and fall back to the CPU when
+there is no GPU. Unpack, grab a model from the [Weights](#weights) section, and run:
+
+```
+breeze-server breeze-tts-2-q8_0.gguf --webui
+```
+
+Then open http://localhost:8080/. The CPU side needs AVX2, which any x64 CPU from roughly 2013 onwards
+has. On Linux the Vulkan loader has to be installed, which it is on any desktop with GPU drivers set up
+(the package is `libvulkan1` on Debian and Ubuntu).
+
 ## Build
 
 ```
