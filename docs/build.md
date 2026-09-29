@@ -53,6 +53,7 @@ cmake --build build-cpu -j
 | `BREEZE_BUILD_CLI` | `ON` | Build `breeze-cli`. |
 | `BREEZE_BUILD_SERVER` | `ON` | Build `breeze-server`. |
 | `BREEZE_BUILD_SHARED` | `ON` | Build the shared C library. |
+| `BREEZE_MP3` | `ON` | Let the server encode MP3 for OpenAI style requests, using the `third_party/shine` submodule. Off, or with the submodule missing, those requests get WAV instead. |
 
 ### CUDA is slower here, and it is worth knowing why
 
@@ -126,6 +127,10 @@ multithreaded.
 
 **`third_party/ggml is missing`** means the submodule was not initialised. Run
 `git submodule update --init --recursive`.
+
+**`third_party/shine is missing so mp3 requests will get wav`** is the same thing
+for the MP3 encoder, which was added after ggml. A clone from before then needs
+`git submodule update --init --recursive` once to pick it up.
 
 **Vulkan shader generation crashes with `0xC0000139`** on Windows when another
 program has put an incompatible `libstdc++-6.dll` earlier on `PATH`. Tesseract

@@ -7,7 +7,7 @@ rather than waiting for the whole clip.
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /health` | Liveness, sample rate, websocket port |
-| `POST /v1/audio/speech` | Generate speech, streamed |
+| `POST /v1/audio/speech` | Generate speech, streamed. Also takes OpenAI style JSON, see [OpenAI compatible requests](#openai-compatible-requests) |
 | `POST /v1/audio/convert` | Respeak a recording in another voice, see [voice-conversion.md](voice-conversion.md) |
 | `POST /v1/voices` | Register or save a reference voice, see [voices.md](voices.md) |
 | `GET /v1/voices` | List cached and saved voices |
@@ -325,6 +325,121 @@ Convert to WAV:
 ```
 ffmpeg -f s16le -ar 24000 -ac 1 -i speech.pcm speech.wav
 ```
+
+## OpenAI compatible requests
+
+`POST /v1/audio/speech` also takes the JSON body of OpenAI's speech API, so
+apps built for it, like SillyTavern or the official OpenAI SDKs, can point at
+the server as they are. The `Content-Type` header decides which one you get:
+`application/json` gets the behaviour described here, a form post gets the
+native behaviour above.
+
+```
+curl http://127.0.0.1:8137/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{"model":"tts-1","input":"Hello from Breeze.","voice":"narrator","response_format":"mp3"}' \
+  -o speech.mp3
+```
+
+With the Python SDK:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8137/v1", api_key="unused")
+with client.audio.speech.with_streaming_response.create(
+    model="tts-1", voice="narrator", input="Streaming from the OpenAI SDK.",
+) as r:
+    r.stream_to_file("speech.mp3")
+```
+
+### Fields
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `input` | string | required | Text to speak, UTF-8. |
+| `voice` | string or `{"id": ...}` | none | A saved or cached voice, the same ids `voice_id` takes. Leave it out to design a voice from `instructions` instead. |
+| `instructions` | string | `Speak clearly and naturally.` | Voice description when designing, delivery direction when cloning. |
+| `response_format` | string | `mp3` | `mp3`, `wav` or `pcm`. `opus`, `aac` and `flac` are accepted but sent as WAV. |
+| `stream_format` | string | `audio` | `audio` streams the file itself, `sse` wraps it in server sent events. |
+| `model` | string | ignored | Accepted so clients that always send one keep working. |
+| `speed` | number | ignored | The model has no speed control. |
+
+The native fields `cfg_scale`, `seed`, `temperature`, `top_k`, `top_p`,
+`repetition_penalty`, `max_new_tokens` and `split_chars` are accepted as extra
+JSON fields, with the same meaning and defaults as above.
+
+OpenAI's own voice names such as `alloy` or `nova` are not built in, and a name
+the server does not know is a `404`. If a client insists on those names, save
+voices under them with `POST /v1/voices` (see [voices.md](voices.md)) and they
+work like any other.
+
+### Formats
+
+| `response_format` | Sent as | `Content-Type` |
+| --- | --- | --- |
+| `mp3` | MP3, 64 kbps mono at 24 kHz | `audio/mpeg` |
+| `wav` | 16 bit mono WAV at 24 kHz | `audio/wav` |
+| `pcm` | Headerless s16le mono at 24 kHz, the same as the native endpoint and OpenAI's own `pcm` | `audio/pcm` |
+| `opus`, `aac`, `flac` | WAV | `audio/wav` |
+
+Every format streams as it is generated, so playback can start on the first
+chunk. The WAV header goes out first with its length fields set to the maximum,
+because the length is not known yet. Browsers and ffmpeg read that to the end
+of the stream.
+
+MP3 is encoded with [shine](https://github.com/toots/shine), which builds from
+the `third_party/shine` submodule. A build without it, or one configured with
+`-DBREEZE_MP3=OFF`, sends WAV when asked for `mp3` as well. The console line for
+each request says what actually went out, for example `openai wav for opus`.
+
+### Server sent events
+
+With `"stream_format": "sse"` the response is `text/event-stream`. Each chunk
+arrives as a `speech.audio.delta` event carrying the next bytes of the file in
+`response_format`, base64 encoded, and a `speech.audio.done` event ends it.
+
+```
+data: {"type":"speech.audio.delta","audio":"//NIxAAAAAAAAAAAAFhpbmcAAAAPAAAA..."}
+
+data: {"type":"speech.audio.done","usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}
+```
+
+Decoding the deltas and joining them gives the same file a plain request
+returns. The token counts are always zero.
+
+### Errors
+
+Errors on this path use OpenAI's error shape, so clients show the message
+instead of a bare status code.
+
+```json
+{"error":{"message":"input is required","type":"invalid_request_error","param":null,"code":null}}
+```
+
+| Status | Cause |
+| --- | --- |
+| `400` | The body is not a JSON object, `input` is missing, or a field has the wrong type or an unknown value. |
+| `404` | `voice` is not a saved or cached voice. |
+| `409` | Another generation is already running. The OpenAI SDKs retry this on their own. |
+
+The `Authorization` header is ignored, so any API key works. That also means
+there is still no authentication, see the warning above.
+
+### SillyTavern
+
+Open the TTS extension, pick **OpenAI Compatible** as the provider and fill in:
+
+| Setting | Value |
+| --- | --- |
+| Provider Endpoint | `http://127.0.0.1:8137/v1/audio/speech` |
+| API Key | Anything, it is ignored. |
+| Model | Anything, it is ignored. |
+| Available Voices | The voice ids you want, comma separated, e.g. `narrator,harbour`. The list from `GET /v1/voices` has them all. |
+
+The default voice list is OpenAI's names, which will all come back `404` until
+you replace it. Speed does nothing. SillyTavern asks for MP3, which is what it
+gets.
 
 ## Streaming client sketch
 
