@@ -4,15 +4,16 @@
 #   imports = [ github:HoppouAI/Breeze-TTS-2.cpp ];
 #   services.breeze-tts = {
 #     enable = true;
-#     model = "q8_0";   # picked from the Hub catalog, downloaded into modelsDir
+#     model = "q8_0";   # picked from the Hub catalog, downloaded into <stateDir>/models
 #   };
 #
-# modelPath is the escape hatch for any file not in the catalog. The model
-# folder does not need audio_tokenizer/: the vocoder is baked into the GGUF by
-# the converter. The server is stateless for generations — what it persists
-# are saved .breeze voices, which live under the state dir so they survive
-# upgrades and reboots (loaded automatically at startup: pass them to
-# speak/listVoices clients with no extra setup).
+# customModel hands the server a file you already have — it wins over model
+# and skips downloading. The model folder does not need audio_tokenizer/: the
+# vocoder is baked into the GGUF by the converter. The server is stateless
+# for generations — what it persists are saved .breeze voices, which live
+# under the state dir so they survive upgrades and reboots (loaded
+# automatically at startup: pass them to speak/listVoices clients with no
+# extra setup).
 
 self:
 { lib, config, pkgs, ... }:
@@ -33,21 +34,28 @@ let
 		"f16" = { file = "breeze-tts-2-f16.gguf"; sha256 = "db740cd464d75f2635a891586f083c5b466fd63542bebd957fe7890324b04c35"; };
 	};
 
-	# the null options each derive from the state dir unless set explicitly
-	voicesDir = if cfg.voicesDir != null then cfg.voicesDir else "${cfg.stateDir}/voices";
-	modelsDir = if cfg.modelsDir != null then cfg.modelsDir else "${cfg.stateDir}/models";
+	# the whole on-disk layout derives from stateDir — voices and models are
+	# its children, not independently configurable
+	modelsDir = "${cfg.stateDir}/models";
+	voicesDir = "${cfg.stateDir}/voices";
 
-	pickedModel = if cfg.model != null then modelCatalog.${cfg.model} else null;
+	custom = cfg.customModel != null;
+	pickedModel = if custom || cfg.model == null then null else modelCatalog.${cfg.model};
 	modelPath =
-		if pickedModel != null then "${modelsDir}/${pickedModel.file}"
-		else if cfg.modelPath != null then
-			(if lib.hasInfix "/" cfg.modelPath then cfg.modelPath else "${modelsDir}/${cfg.modelPath}")
+		if custom then
+			(if lib.hasInfix "/" cfg.customModel
+				then cfg.customModel
+				else "${modelsDir}/${cfg.customModel}")
+		else if pickedModel != null then "${modelsDir}/${pickedModel.file}"
 		else
-			throw "services.breeze-tts: set model to one of ${lib.concatStringsSep ", " (builtins.attrNames modelCatalog)}, or point modelPath at a GGUF";
+			throw "services.breeze-tts: set model to one of ${
+				lib.concatStringsSep ", " (builtins.attrNames modelCatalog)
+			}, or point customModel at a GGUF";
 
-	# catalog picks are fetched into modelsDir by the unit itself: verify the
-	# pin on every start (cheap, and this is where a bad drive shows up), and
-	# download or resume into a .part file with an atomic rename
+	# catalog picks are fetched into modelsDir by the unit itself: an existing
+	# file that passes the pin makes this a no-op, so on every start the pin is
+	# simply re-verified; download or resume goes into a .part file with an
+	# atomic rename, and a mismatched file is discarded for re-download
 	fetchModel = pkgs.writeShellScript "breeze-fetch-model" ''
 		set -euo pipefail
 		target="${modelsDir}/${pickedModel.file}"
@@ -63,7 +71,7 @@ let
 
 		part="$target.part"
 		if [ -f "$part" ]; then then_resume="-C -"; else then_resume=""; fi
-		printf 'fetching %s into modelsDir\n' "${pickedModel.file}"
+		printf 'fetching %s into %s\n' "${pickedModel.file}" "${modelsDir}"
 		curl -fL --retry 5 --retry-delay 3 --connect-timeout 15 $then_resume -o "$part" "$url"
 		verify "$part"
 		mv -f "$part" "$target"
@@ -90,7 +98,7 @@ in
 		stateDir = lib.mkOption {
 			type = lib.types.str;
 			default = "/var/lib/breeze-tts";
-			description = "State directory for the service: saved voices (<stateDir>/voices) and, implicitly, the served models (<stateDir>/models). Under /var/lib both are created and kept by systemd; point them at a mounted directory with stateDir or the per-item options.";
+			description = "The single state-directory knob: saved voices live in <stateDir>/voices and the served model (catalog downloads, bare customModel names) in <stateDir>/models. Under /var/lib both children are created and kept by systemd; anywhere else the operator owns the directory.";
 		};
 
 		package = lib.mkOption {
@@ -104,26 +112,14 @@ in
 			type = lib.types.nullOr (lib.types.enum (builtins.attrNames modelCatalog));
 			default = null;
 			description = ''
-				Which shipped checkpoint to serve: f16 (reference quality) or a quantised variant (q8_0 recommended, the -dd ones quantise the depth decoder too and are leaner in VRAM but drift past ~45 s of narration). On the first start the model is downloaded from the Hub into modelsDir and named for its file; every start after that verifies its sha256, so the Hub only needs to be reachable while the file is missing.
+				Which shipped checkpoint to serve: f16 (reference quality) or a quantised variant (q8_0 recommended, the -dd ones quantise the depth decoder too and are leaner in VRAM but drift past ~45 s of narration). The file is downloaded from the Hub into <stateDir>/models on the first start and named for its Hub file; afterwards, as long as the expected file is there and passes its sha256 pin, the download step is a no-op. Ignored when customModel is set.
 			'';
 		};
 
-		modelPath = lib.mkOption {
+		customModel = lib.mkOption {
 			type = lib.types.nullOr lib.types.str;
 			default = null;
-			description = "Escape hatch when model is not set: a GGUF by bare filename (resolved inside modelsDir) or by any path (absolute, store path, Hugging Face cache path). No download or verification happens for this one; exactly one of model and modelPath must be set.";
-		};
-
-		modelsDir = lib.mkOption {
-			type = lib.types.nullOr lib.types.str;
-			default = null;
-			description = "Folder of GGUF checkpoints; a bare modelPath filename and catalog downloads resolve within it. null means <stateDir>/models, so the models folder lives inside the state dir unless pointed elsewhere (a Hugging Face local checkout, a shared models directory).";
-		};
-
-		voicesDir = lib.mkOption {
-			type = lib.types.nullOr lib.types.str;
-			default = null;
-			description = "Folder of saved .breeze voices, passed to the server as --voices-dir. null means <stateDir>/voices; override only to move voices off the state dir.";
+			description = "Escape hatch for a GGUF outside the catalog: a bare filename resolved inside <stateDir>/models, or any path (absolute, store path, Hugging Face checkout). When set it wins over model — nothing is downloaded or verified, so the operator owns the file's correctness.";
 		};
 
 		host = lib.mkOption {
@@ -164,6 +160,10 @@ in
 	};
 
 	config = lib.mkIf cfg.enable {
+		warnings = lib.mkIf (custom && cfg.model != null) [
+			"services.breeze-tts: customModel is set, so model = \"${cfg.model}\" is ignored and no download will run"
+		];
+
 		environment.systemPackages = [ cfg.package ];
 
 		systemd.services.breeze-tts = {
@@ -185,13 +185,11 @@ in
 					]
 					++ serverArgs
 				);
-				StateDirectory = lib.optionals stateManaged (
-					[
-						stateSubdir
-						"${stateSubdir}/voices"
-					]
-					++ lib.optionals (cfg.modelsDir == null) [ "${stateSubdir}/models" ]
-				);
+				StateDirectory = lib.optionals stateManaged [
+					stateSubdir
+					"${stateSubdir}/voices"
+					"${stateSubdir}/models"
+				];
 				# Voice files are user content; keep them on restarts
 				Restart = "on-failure";
 				RestartSec = 5;
