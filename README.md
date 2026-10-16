@@ -83,23 +83,39 @@ Add `-DBREEZE_VULKAN=OFF` for a CPU only build. Outputs are `breeze-cli`, `breez
 
 ### Nix
 
-If you have [Nix](https://nixos.org/) with flake support, the dev shell provides all build
-dependencies (CMake, Ninja, Vulkan SDK, Python for conversion) and a few convenience commands:
-
-To enter the dev shell, run:
-
-```
-nix develop          # or: nix develop .#cpu
-```
-
-After entering the dev shell, run the following commands to build and run the CLI/server:
+With [Nix](https://nixos.org/) (flake support on), `nix develop` gets you the build environment
+above — CMake, Ninja, the Vulkan SDK and the Python conversion deps — plus convenience commands.
+`nix develop .#cpu` is a CPU-only shell.
 
 ```
-breeze-build         # configure + build (Vulkan)
-breeze-build --cpu   # configure + build (CPU only)
-breeze-cli           # run the CLI
-breeze-server        # run the server
+breeze-build         # configure + build (Vulkan); pass --cpu to skip Vulkan
+breeze-cli           # run build/breeze-cli
+breeze-server        # run build/breeze-server
 ```
+
+The flake also ships a NixOS module that runs `breeze-server` as a systemd service. Model picks
+from the Hub catalog are downloaded into the state dir and sha256-verified on every start, saved
+voices persist across reboots, and the web UI is one option away:
+
+```nix
+{
+  inputs.breeze-tts.url = "github:HoppouAI/Breeze-TTS-2.cpp/feat/nix";
+  # ...
+  modules = [
+    breeze-tts.nixosModules.default
+    {
+      hardware.graphics.enable = true;  # Vulkan driver bits for the GPU backend
+      services.breeze-tts = {
+        enable = true;
+        webui = true;
+        model = "q8_0";   # or: customModel = "/path/to/your.gguf";
+      };
+    }
+  ];
+}
+```
+
+All options, the state-dir layout and the operational details: [nix/README.md](nix/README.md).
 
 ## Weights
 

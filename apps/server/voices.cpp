@@ -10,7 +10,7 @@
 namespace breeze {
 
 // keyed off the clip and its transcript, so sending the same voice twice lands on the same entry
-static std::string voice_key(const std::string & wav, const std::string & text) {
+std::string voice_key(const std::string & wav, const std::string & text) {
     uint64_t h = 1469598103934665603ull;
     for (unsigned char c : wav) { h ^= c; h *= 1099511628211ull; }
     for (unsigned char c : text) { h ^= c; h *= 1099511628211ull; }
@@ -83,6 +83,22 @@ bool VoiceStore::take(const std::string & id, std::vector<int> & codes, int & fr
     return true;
 }
 
+void VoiceStore::put(const std::string & id, CachedVoice v) {
+    std::lock_guard<std::mutex> vg(m_mutex);
+    if (!m_voices.count(id) && m_order.size() >= max_voices) {
+        // saved voices are not evicted, they were asked for by name
+        for (size_t i = 0; i < m_order.size(); i++) {
+            if (m_voices[m_order[i]].saved) continue;
+            m_voices.erase(m_order[i]);
+            m_order.erase(m_order.begin() + i);
+            break;
+        }
+    }
+    const bool fresh = !m_voices.count(id);
+    if (fresh) m_order.push_back(id);
+    m_voices[id] = std::move(v);
+}
+
 void VoiceStore::add_routes(httplib::Server & svr, BreezeModel & model, MimiCodec & codec,
                             std::mutex & gpu, const std::string & dir) {
     const int sr = model.cfg.sample_rate;
@@ -133,20 +149,7 @@ void VoiceStore::add_routes(httplib::Server & svr, BreezeModel & model, MimiCode
                 return fail(res, 500, "could not write the voice file");
             v.saved = true;
         }
-        {
-            std::lock_guard<std::mutex> vg(m_mutex);
-            if (!m_voices.count(id) && m_order.size() >= max_voices) {
-                // saved voices are not evicted, they were asked for by name
-                for (size_t i = 0; i < m_order.size(); i++) {
-                    if (m_voices[m_order[i]].saved) continue;
-                    m_voices.erase(m_order[i]);
-                    m_order.erase(m_order.begin() + i);
-                    break;
-                }
-            }
-            if (!m_voices.count(id)) m_order.push_back(id);
-            m_voices[id] = v;
-        }
+        put(id, std::move(v));
         printf("voice %s cached%s, %d frames in %.0f ms\n", id.c_str(),
                v.saved ? " and saved" : "", v.frames, v.encode_ms);
         fflush(stdout);

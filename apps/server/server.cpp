@@ -230,8 +230,33 @@ int run_server(const ServerOptions & opts) {
         g.chunk_max = opts.chunk_max;
         if (req.has_file("ref_audio")) {
             const auto & f = req.get_file_value("ref_audio");
-            if (!f.content.empty())
+            if (!f.content.empty() && !g.ref_text.empty()) {
+                // a raw upload joins the same hash cache an unnamed POST /v1/voices entry
+                // does: identical clip and transcript reuse the codes instead of re-running
+                // the codec (which is most of the pre-audio wait), and identical seeds give
+                // byte identical audio either way
+                const std::string key = voice_key(f.content, g.ref_text);
+                if (!store.take(key, g.ref_codes, g.ref_frames, g.ref_text)) {
+                    std::vector<float> pcm;
+                    if (read_wav_buffer((const uint8_t *) f.content.data(), f.content.size(), sr, pcm) && !pcm.empty()) {
+                        CachedVoice v;
+                        v.text = g.ref_text;
+                        const auto t0 = std::chrono::steady_clock::now();
+                        v.codes = codec.encode(pcm, v.frames);
+                        v.encode_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                        printf("ref %s: encoded %d frames in %.0f ms\n", key.c_str(), v.frames, v.encode_ms);
+                        fflush(stdout);
+                        g.ref_codes = v.codes;
+                        g.ref_frames = v.frames;
+                        store.put(key, std::move(v));
+                    }
+                } else {
+                    printf("ref %s: cache hit, %d frames, encode skipped\n", key.c_str(), g.ref_frames);
+                    fflush(stdout);
+                }
+            } else if (!f.content.empty()) {
                 read_wav_buffer((const uint8_t *) f.content.data(), f.content.size(), sr, g.ref_audio);
+            }
         }
         const std::string vid = field(req, "voice_id", "");
         if (!vid.empty() && !store.take(vid, g.ref_codes, g.ref_frames, g.ref_text)) {
@@ -250,7 +275,8 @@ int run_server(const ServerOptions & opts) {
         res.set_header("Cache-Control", "no-store");
 
         const bool sent_ins = req.has_file("instruction") || req.has_param("instruction");
-        const char * mode = !g.ref_audio.empty() ? (sent_ins ? "direction" : "clone") : "design";
+        const bool has_ref = !g.ref_audio.empty() || !g.ref_codes.empty();
+        const char * mode = has_ref ? (sent_ins ? "direction" : "clone") : "design";
         printf("gen  %s, %d chars, cfg %.1f, seed %d\n", mode, (int) g.text.size(), g.cfg_scale, g.seed);
         fflush(stdout);
 

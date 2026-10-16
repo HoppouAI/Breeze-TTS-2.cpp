@@ -215,7 +215,7 @@ Accepts `multipart/form-data` (needed for the reference audio upload) or
 | --- | --- | --- | --- |
 | `text` | string | required | Text to speak, UTF-8. |
 | `instruction` | string | `Speak clearly and naturally.` | Voice description or delivery direction. |
-| `ref_audio` | file | none | Reference WAV for cloning. Any sample rate or channel count; resampled to mono at the model rate. |
+| `ref_audio` | file | none | Reference WAV for cloning. Any sample rate or channel count; resampled to mono at the model rate. Identical repeated uploads (same bytes and transcript) reuse the reference encode from the in-memory hash cache instead of re-encoding; see [voices.md](voices.md). |
 | `ref_text` | string | empty | Exact transcript of `ref_audio`. Required whenever `ref_audio` is present. |
 | `voice_id` | string | none | A saved or cached voice to clone instead of uploading a clip. Skips the reference encode. See [voices.md](voices.md). |
 | `cfg_scale` | float | `1.0` | Classifier free guidance. `1.0` disables it. |
