@@ -61,6 +61,10 @@
             src = self;
 
             preConfigure = ''
+              # the git-archive/flake source carries the submodule as an
+              # empty directory; ln -sfn cannot replace a real directory (it
+              # nests the link inside it), so clear the stub first
+              rm -rf third_party/ggml
               ln -sfn ${ggmlSrc} third_party/ggml
               # a dirty worktree path input snapshots ignored directories too
               # (build/, models/, result); a stale CMakeCache.txt from the
