@@ -21,7 +21,9 @@ audio either way, so this only removes repeated work.
 name, are keyed by a hash of the clip and its transcript, and disappear when the
 server restarts. Posting the same clip twice returns the same id and skips the
 encode, so a client that registers on every startup costs nothing after the
-first time.
+first time. Raw clips uploaded to `/v1/audio/speech` enter this cache as well:
+the handler hashes the upload with its transcript and reuses the stored codes on
+a hit, so plain repeated uploads pay the encode only once per clip.
 
 **Saved** voices are files. They are created with a name, written to the voices
 folder as `<name>.breeze`, loaded at startup, and never evicted. The CLI, the

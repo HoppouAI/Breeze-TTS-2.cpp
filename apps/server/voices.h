@@ -19,6 +19,9 @@ inline std::string field(const httplib::Request & req, const char * name, const 
     return def;
 }
 
+// hash of the clip bytes and its transcript; the id unnamed reference clips are cached under
+std::string voice_key(const std::string & wav, const std::string & text);
+
 struct CachedVoice {
     std::vector<int> codes;
     int frames = 0;
@@ -34,6 +37,10 @@ public:
 
     // fills in a cached reference, false only when the id is unknown
     bool take(const std::string & id, std::vector<int> & codes, int & frames, std::string & text);
+
+    // in-memory insert under an explicit id (the hash of a raw clip upload);
+    // unnamed entries are evicted oldest-first when the table is full
+    void put(const std::string & id, CachedVoice v);
 
     void add_routes(httplib::Server & svr, BreezeModel & model, MimiCodec & codec, std::mutex & gpu,
                     const std::string & dir);
