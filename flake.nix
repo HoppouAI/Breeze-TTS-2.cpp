@@ -9,7 +9,8 @@
   outputs = { self, nixpkgs, flake-utils, ... }:
     {
       # Importable module: runs breeze-server as a systemd service.
-      # Set services.breeze-tts.modelPath; the package defaults to this flake.
+      # Set services.breeze-tts.model (a Hub catalog pick, downloaded to the
+      # state dir's models folder) or services.breeze-tts.modelPath.
       nixosModules.breeze-tts = import ./nix/module.nix self;
       nixosModules.default = self.nixosModules.breeze-tts;
     }

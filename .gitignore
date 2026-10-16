@@ -57,3 +57,7 @@ build-cuda/
 
 # saved reference voices are local data
 voices/
+
+# nix and editor local noise
+/result
+.cache/
