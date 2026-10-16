@@ -64,3 +64,5 @@ voices/
 /.agents
 /.claude
 skills-lock.json
+result
+mcp

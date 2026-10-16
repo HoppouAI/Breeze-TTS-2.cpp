@@ -260,6 +260,20 @@ which is what you want when driving it from a chat model. See [docs/websocket.md
 > **Neither port has authentication or rate limiting.** Keep them bound to `127.0.0.1` unless something
 > in front of them is handling that.
 
+## MCP server
+
+[breeze-tts-2-mcp](https://github.com/fortesoft-co/breeze-tts-2-mcp) is an MCP server that gives
+MCP-speaking agents the voice toolkit: speaking aloud with voice direction and vocal events
+(`speak`, `speechJobs`), multi-voice dialogue and narration as one artifact (`speakScript`),
+voice design from a description (`designVoice`), and saved voice [library](docs/voices.md)
+management (`saveVoice`, `listVoices`, `deleteVoice`). It drives a running `breeze-server` over
+HTTP and coordinates local audio playback across clients.
+
+Setup: clone, `npm install && npm run build`, and point it at the server with `BREEZE_TTS_URL`.
+A `breeze-speak` binary and an Agent Skills bundle cover callers without an MCP host. Registering
+it with Zed, Claude Code or any stdio MCP client, the full tool list and all environment options
+are in the [upstream README](https://github.com/fortesoft-co/breeze-tts-2-mcp).
+
 ## Bindings
 
 The shared library exposes a plain C ABI, so any language with an FFI can drive it.
