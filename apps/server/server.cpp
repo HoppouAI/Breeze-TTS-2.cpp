@@ -1,4 +1,6 @@
 #include "server.h"
+#include "encode.h"
+#include "openai.h"
 #include "voices.h"
 #include "ws.h"
 #include "ws_api.h"
@@ -45,6 +47,64 @@ static std::string bar(double frac, int width) {
     return s;
 }
 
+// an origin thats not on the allowlist gets an empty string, so no header goes out
+static std::string cors_origin(const std::string & allowed, const httplib::Request & req) {
+    if (allowed == "*") return "*";
+    const std::string origin = req.get_header_value("Origin");
+    if (origin.empty()) return "";
+    size_t start = 0;
+    while (start <= allowed.size()) {
+        size_t end = allowed.find(',', start);
+        if (end == std::string::npos) end = allowed.size();
+        if (allowed.compare(start, end - start, origin) == 0) return origin;
+        start = end + 1;
+    }
+    return "";
+}
+
+// one generation with the console progress bar, emit gets each decoded chunk and false stops it
+static void run_generation(BreezeModel & model, MimiCodec & codec, const GenRequest & g, int sr, bool verbose,
+                           const AudioCallback & emit) {
+    GenTimings tm;
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto elapsed = [&] {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    };
+    // the model decides when to stop, so the total is only ever an estimate
+    const double est = estimate_seconds(g.text);
+    size_t total = 0;
+    try {
+        generate(model, codec, g, [&](const float * s, int n) {
+            if (!emit(s, n)) return false;
+            total += (size_t) n;
+            const double secs = (double) total / sr, wall = elapsed();
+            const double rate = wall > 0 ? secs / wall : 0;
+            const double frac = est > 0 ? secs / est : 0;
+            const double eta = rate > 0 ? (est > secs ? (est - secs) / rate : 0) : 0;
+            printf("\r%3.0f%%|%s| %.1f/%.1fs [%s<%s, %.1f fps, %.2fx]  ",
+                   (frac < 1 ? frac : 1) * 100, bar(frac, 24).c_str(), secs, est,
+                   mmss(wall).c_str(), mmss(eta).c_str(), secs * 12.5 / wall, rate);
+            fflush(stdout);
+            return true;
+        }, &tm);
+    } catch (const std::exception & e) {
+        fprintf(stderr, "\ngeneration error: %s\n", e.what());
+    }
+    const double secs = (double) total / sr, wall = elapsed();
+    printf("\r%3.0f%%|%s| %.1f/%.1fs [%s, %.1f fps, %.2fx]        \n",
+           100.0, bar(1, 24).c_str(), secs, secs, mmss(wall).c_str(),
+           wall > 0 ? secs * 12.5 / wall : 0.0, wall > 0 ? secs / wall : 0.0);
+    printf("     %d frames in %d flushes, first audio %.0f ms\n",
+           tm.frames, tm.flushes, tm.first_audio);
+    if (verbose && tm.frames > 0) {
+        printf("     ref %.0f  prompt %.0f  prefill %.0f ms | per frame: backbone %.2f"
+               "  depth %.2f  vocoder %.2f ms\n",
+               tm.encode_ref, tm.prompt, tm.prefill, tm.backbone / tm.frames,
+               tm.depth / tm.frames, tm.vocoder / tm.frames);
+    }
+    fflush(stdout);
+}
+
 int run_server(const ServerOptions & opts) {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8); // otherwise the bar glyphs and any chinese text come out as mojibake
@@ -71,7 +131,7 @@ int run_server(const ServerOptions & opts) {
     const int ws_port = opts.ws_port == 0 ? opts.port + 1 : opts.ws_port;
     if (ws_port > 0) {
         const bool up = ws.start(opts.host, ws_port, [&](WsConn & c) {
-            ws_connection(c, model, codec, store, *mutex, opts.chunk_first, opts.chunk_max);
+            ws_connection(c, model, codec, store, *mutex, opts.chunk_first, opts.chunk_max, opts.split_chars);
         });
         if (up) printf("websocket on ws://%s:%d\n", opts.host.c_str(), ws_port);
         else fprintf(stderr, "could not open the websocket port %d\n", ws_port);
@@ -83,11 +143,75 @@ int run_server(const ServerOptions & opts) {
                         "application/json");
     });
 
+    // openai clients post json to the same path, the form fields keep the native behaviour
+    const auto speak_openai = [&](const httplib::Request & req, httplib::Response & res,
+                                  std::shared_ptr<std::unique_lock<std::mutex>> lock) {
+        OpenAiSpeech o;
+        int status = 200;
+        const std::string err = parse_openai_speech(req.body, store, opts.split_chars, o, status);
+        if (!err.empty()) {
+            res.status = status;
+            res.set_content(openai_error(err), "application/json");
+            return;
+        }
+        o.g.chunk_first = opts.chunk_first;
+        o.g.chunk_max = opts.chunk_max;
+        std::string sent, ctype;
+        std::shared_ptr<AudioEncoder> enc = make_encoder(o.format, sr, sent, ctype);
+
+        res.set_header("X-Sample-Rate", std::to_string(sr));
+        res.set_header("Cache-Control", "no-store");
+        if (o.sse) ctype = "text/event-stream";
+
+        const char * mode = o.g.ref_frames > 0 ? (o.g.instruction != GenRequest().instruction ? "direction" : "clone")
+                                               : "design";
+        printf("gen  %s, %d chars, cfg %.1f, seed %d, openai %s%s%s\n", mode, (int) o.g.text.size(),
+               o.g.cfg_scale, o.g.seed, sent.c_str(), sent != o.format ? " for " : "",
+               sent != o.format ? o.format.c_str() : "");
+        fflush(stdout);
+
+        res.set_chunked_content_provider(
+            ctype, [&model, &codec, g = o.g, sse = o.sse, enc, lock, sr, verbose = opts.verbose](
+                       size_t, httplib::DataSink & sink) {
+                std::string buf;
+                const auto flush = [&] {
+                    if (buf.empty()) return true;
+                    const std::string out = sse ? sse_audio_delta(buf) : buf;
+                    buf.clear();
+                    return sink.write(out.data(), out.size());
+                };
+                enc->begin(buf);
+                if (flush()) {
+                    bool alive = true;
+                    run_generation(model, codec, g, sr, verbose, [&](const float * s, int n) {
+                        enc->write(s, n, buf);
+                        return alive = flush();
+                    });
+                    if (alive) {
+                        enc->finish(buf);
+                        if (flush() && sse) {
+                            const std::string done = sse_audio_done();
+                            sink.write(done.data(), done.size());
+                        }
+                    }
+                }
+                sink.done();
+                return true;
+            });
+    };
+
     svr.Post("/v1/audio/speech", [&, mutex](const httplib::Request & req, httplib::Response & res) {
+        const bool json = req.get_header_value("Content-Type").find("json") != std::string::npos;
         auto lock = std::make_shared<std::unique_lock<std::mutex>>(*mutex, std::try_to_lock);
         if (!*lock) {
             res.status = 409;
-            res.set_content("{\"error\":\"busy\"}", "application/json");
+            res.set_content(json ? openai_error("busy, another generation is running", "server_error")
+                                 : "{\"error\":\"busy\"}",
+                            "application/json");
+            return;
+        }
+        if (json) {
+            speak_openai(req, res, lock);
             return;
         }
         GenRequest g;
@@ -101,7 +225,7 @@ int run_server(const ServerOptions & opts) {
         g.top_p = (float) atof(field(req, "top_p", "0").c_str());
         g.repetition_penalty = (float) atof(field(req, "repetition_penalty", "0").c_str());
         g.max_new_tokens = atoi(field(req, "max_new_tokens", "0").c_str());
-        g.split_chars = atoi(field(req, "split_chars", "600").c_str());
+        g.split_chars = atoi(field(req, "split_chars", std::to_string(opts.split_chars)).c_str());
         g.chunk_first = opts.chunk_first;
         g.chunk_max = opts.chunk_max;
         if (req.has_file("ref_audio")) {
@@ -159,45 +283,10 @@ int run_server(const ServerOptions & opts) {
         res.set_chunked_content_provider(
             "audio/pcm",
             [&model, &codec, g, lock, sr, verbose = opts.verbose](size_t, httplib::DataSink & sink) {
-                GenTimings tm;
-                const auto t0 = std::chrono::steady_clock::now();
-                const auto elapsed = [&] {
-                    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-                };
-                // the model decides when to stop, so the total is only ever an estimate
-                const double est = estimate_seconds(g.text);
-                size_t total = 0;
-                try {
-                    generate(model, codec, g, [&](const float * s, int n) {
-                        std::vector<uint8_t> pcm = to_pcm16(s, n);
-                        if (!sink.write((const char *) pcm.data(), pcm.size())) return false;
-                        total += (size_t) n;
-                        const double secs = (double) total / sr, wall = elapsed();
-                        const double rate = wall > 0 ? secs / wall : 0;
-                        const double frac = est > 0 ? secs / est : 0;
-                        const double eta = rate > 0 ? (est > secs ? (est - secs) / rate : 0) : 0;
-                        printf("\r%3.0f%%|%s| %.1f/%.1fs [%s<%s, %.1f fps, %.2fx]  ",
-                               (frac < 1 ? frac : 1) * 100, bar(frac, 24).c_str(), secs, est,
-                               mmss(wall).c_str(), mmss(eta).c_str(), secs * 12.5 / wall, rate);
-                        fflush(stdout);
-                        return true;
-                    }, &tm);
-                } catch (const std::exception & e) {
-                    fprintf(stderr, "\ngeneration error: %s\n", e.what());
-                }
-                const double secs = (double) total / sr, wall = elapsed();
-                printf("\r%3.0f%%|%s| %.1f/%.1fs [%s, %.1f fps, %.2fx]        \n",
-                       100.0, bar(1, 24).c_str(), secs, secs, mmss(wall).c_str(),
-                       wall > 0 ? secs * 12.5 / wall : 0.0, wall > 0 ? secs / wall : 0.0);
-                printf("     %d frames in %d flushes, first audio %.0f ms\n",
-                       tm.frames, tm.flushes, tm.first_audio);
-                if (verbose && tm.frames > 0) {
-                    printf("     ref %.0f  prompt %.0f  prefill %.0f ms | per frame: backbone %.2f"
-                           "  depth %.2f  vocoder %.2f ms\n",
-                           tm.encode_ref, tm.prompt, tm.prefill, tm.backbone / tm.frames,
-                           tm.depth / tm.frames, tm.vocoder / tm.frames);
-                }
-                fflush(stdout);
+                run_generation(model, codec, g, sr, verbose, [&](const float * s, int n) {
+                    const std::vector<uint8_t> pcm = to_pcm16(s, n);
+                    return sink.write((const char *) pcm.data(), pcm.size());
+                });
                 sink.done();
                 return true;
             });
@@ -286,6 +375,26 @@ int run_server(const ServerOptions & opts) {
             res.set_content(breeze_webui::app_js, "application/javascript");
         });
         printf("web ui: http://%s:%d/\n", opts.host.c_str(), opts.port);
+    }
+
+    if (!opts.cors.empty()) {
+        // post routing hits every response, errors and the chunked stream included
+        svr.set_post_routing_handler([&](const httplib::Request & req, httplib::Response & res) {
+            const std::string origin = cors_origin(opts.cors, req);
+            if (origin.empty()) return;
+            res.set_header("Access-Control-Allow-Origin", origin);
+            res.set_header("Access-Control-Expose-Headers", "X-Sample-Rate, X-Sample-Format");
+            if (origin != "*") res.set_header("Vary", "Origin");
+        });
+        // an origin off the list still gets a 204, just without the header, so the browser refuses it
+        svr.Options(".*", [](const httplib::Request & req, httplib::Response & res) {
+            res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+            res.set_header("Access-Control-Max-Age", "86400");
+            const std::string want = req.get_header_value("Access-Control-Request-Headers");
+            if (!want.empty()) res.set_header("Access-Control-Allow-Headers", want);
+            res.status = 204;
+        });
+        printf("cors: %s\n", opts.cors == "*" ? "any origin" : opts.cors.c_str());
     }
 
     printf("listening on http://%s:%d\n", opts.host.c_str(), opts.port);

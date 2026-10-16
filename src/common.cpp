@@ -3,12 +3,14 @@
 
 #include <cmath>
 #include <cstring>
+#include <stdexcept>
 
 namespace breeze {
 
 void Backend::init(bool prefer_gpu) {
     if (prefer_gpu) {
         backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr);
+        if (!backend) backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_IGPU, nullptr);
         is_gpu = backend != nullptr;
     }
     if (!backend) {
@@ -61,6 +63,7 @@ Graph::Graph(size_t n_nodes) {
 }
 
 Graph::~Graph() {
+    if (alloc) ggml_gallocr_free(alloc);
     if (ctx) ggml_free(ctx);
 }
 
@@ -86,11 +89,34 @@ void Graph::compute(Backend & be, ggml_tensor * out) {
     ggml_set_output(out);
     for (ggml_tensor * r : extra_roots) ggml_build_forward_expand(gf, r);
     ggml_build_forward_expand(gf, out);
-    ggml_gallocr_alloc_graph(be.alloc, gf);
+    if (!ggml_gallocr_alloc_graph(be.alloc, gf)) {
+        ggml_gallocr_free(be.alloc);
+        be.alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(be.backend));
+        throw std::runtime_error("could not allocate inference graph");
+    }
     for (auto & pr : pending) {
         ggml_backend_tensor_set(pr.first, pr.second.data(), 0, pr.second.size());
     }
-    ggml_backend_graph_compute(be.backend, gf);
+    replay(be);
+}
+
+void Graph::prepare(Backend & be, ggml_tensor * out) {
+    if (alloc) throw std::logic_error("inference graph is already prepared");
+    ggml_set_output(out);
+    // constant inputs must survive in-place operations between replays
+    for (auto & pr : pending) ggml_set_output(pr.first);
+    for (ggml_tensor * r : extra_roots) ggml_build_forward_expand(gf, r);
+    ggml_build_forward_expand(gf, out);
+    alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(be.backend));
+    if (!ggml_gallocr_alloc_graph(alloc, gf)) throw std::runtime_error("could not allocate cached inference graph");
+    for (auto & pr : pending)
+        ggml_backend_tensor_set(pr.first, pr.second.data(), 0, pr.second.size());
+    pending.clear();
+}
+
+void Graph::replay(Backend & be) {
+    if (ggml_backend_graph_compute(be.backend, gf) != GGML_STATUS_SUCCESS)
+        throw std::runtime_error("inference graph execution failed");
 }
 
 ggml_tensor * cache_append(ggml_context * ctx, Graph & g, ggml_tensor * cache, ggml_tensor * cur, int pos) {
@@ -117,9 +143,9 @@ ggml_tensor * linear(ggml_context * ctx, ggml_tensor * w, ggml_tensor * x) {
 
 ggml_tensor * swiglu_ffn(ggml_context * ctx, ggml_tensor * x, ggml_tensor * gate,
                          ggml_tensor * up, ggml_tensor * down) {
-    ggml_tensor * g = ggml_silu(ctx, ggml_mul_mat(ctx, gate, x));
+    ggml_tensor * g = ggml_mul_mat(ctx, gate, x);
     ggml_tensor * u = ggml_mul_mat(ctx, up, x);
-    return ggml_mul_mat(ctx, down, ggml_mul(ctx, g, u));
+    return ggml_mul_mat(ctx, down, ggml_swiglu_split(ctx, g, u));
 }
 
 ggml_tensor * attention(ggml_context * ctx, ggml_tensor * q, ggml_tensor * k, ggml_tensor * v,

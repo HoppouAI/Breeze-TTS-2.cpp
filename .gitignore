@@ -61,3 +61,6 @@ voices/
 # nix and editor local noise
 /result
 .cache/
+/.agents
+/.claude
+skills-lock.json

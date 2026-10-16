@@ -87,7 +87,9 @@ static std::vector<std::string> drain(std::string & buf, int budget, bool force)
         const size_t sp = buf.rfind(' ');
         if (sp != std::string::npos) cut = sp + 1;
     }
-    if (force && !cut) cut = buf.size();
+    // flush and end mean all of it, otherwise a tail after the last full stop (a closing quote,
+    // an unfinished clause) sits in the buffer and gets glued onto the front of the next message
+    if (force) cut = buf.size();
     if (!cut) return out;
 
     std::string ready = buf.substr(0, cut);
@@ -101,17 +103,25 @@ static std::vector<std::string> drain(std::string & buf, int budget, bool force)
 
 namespace {
 
+// each piece remembers the instruction that was live when it was queued, otherwise a
+// direction sent while the queue is deep would land on whatever piece happens to start next
+struct Piece {
+    std::string text;
+    std::string instruction;
+};
+
 struct Session {
     GenSession gen;
     std::mutex mu;
     std::condition_variable cv;
-    std::deque<std::string> queue;
+    std::deque<Piece> queue;
     std::string buffer;
     std::string instruction = "Speak clearly and naturally.";
     int budget = 600;
     bool started = false;
     bool ending = false;
     bool quit = false;
+    bool speaking = false;
     std::atomic<bool> cancel{false};
 };
 
@@ -124,31 +134,33 @@ static void event(WsConn & c, const std::string & type, const std::string & extr
 // drains the queue one piece at a time, taking the gpu lock for each so other connections interleave
 static void speaker(WsConn & conn, Session & s, std::mutex & gpu) {
     for (;;) {
-        std::string piece;
+        Piece piece;
         {
             std::unique_lock<std::mutex> lock(s.mu);
+            s.speaking = false;
             s.cv.wait(lock, [&] { return s.quit || !s.queue.empty(); });
             if (s.quit) return;
-            piece = s.queue.front();
+            piece = std::move(s.queue.front());
             s.queue.pop_front();
+            s.speaking = true;
         }
-        if (s.cancel) continue;
+        if (s.cancel) { s.cancel = false; continue; }
 
         std::unique_lock<std::mutex> hold(gpu, std::try_to_lock);
         if (!hold) {
             event(conn, "queued");
             hold.lock();
         }
-        if (s.cancel) continue;
+        if (s.cancel) { s.cancel = false; continue; }
 
         {
             std::lock_guard<std::mutex> lock(s.mu);
-            s.gen.set_instruction(s.instruction);
+            s.gen.set_instruction(piece.instruction);
         }
-        event(conn, "speaking", "\"text\":\"" + esc(piece) + "\"");
+        event(conn, "speaking", "\"text\":\"" + esc(piece.text) + "\"");
 
         int sent = 0;
-        const bool ok = s.gen.speak(piece, [&](const float * a, int n) {
+        const bool ok = s.gen.speak(piece.text, [&](const float * a, int n) {
             if (s.cancel || !conn.alive()) return false;
             std::vector<uint8_t> pcm = to_pcm16(a, n);
             sent += n;
@@ -168,7 +180,8 @@ static void speaker(WsConn & conn, Session & s, std::mutex & gpu) {
 }
 
 static void handle_start(WsConn & conn, Session & s, const std::string & msg, BreezeModel & model,
-                         MimiCodec & codec, VoiceStore & store, int chunk_first, int chunk_max) {
+                         MimiCodec & codec, VoiceStore & store, int chunk_first, int chunk_max,
+                         int split_chars) {
     GenRequest g;
     g.instruction = json_str(msg, "instruction");
     if (g.instruction.empty()) g.instruction = "Speak clearly and naturally.";
@@ -188,7 +201,8 @@ static void handle_start(WsConn & conn, Session & s, const std::string & msg, Br
 
     std::lock_guard<std::mutex> lock(s.mu);
     s.instruction = g.instruction;
-    s.budget = (int) json_num(msg, "split_chars", 600);
+    s.budget = (int) json_num(msg, "split_chars", split_chars);
+    // streaming drains sentence by sentence, so it always needs a real budget to aim at
     if (s.budget <= 0) s.budget = 600;
     s.gen.begin(model, codec, g);
     s.started = true;
@@ -199,7 +213,7 @@ static void handle_start(WsConn & conn, Session & s, const std::string & msg, Br
 }
 
 void ws_connection(WsConn & conn, BreezeModel & model, MimiCodec & codec, VoiceStore & store,
-                   std::mutex & gpu, int chunk_first, int chunk_max) {
+                   std::mutex & gpu, int chunk_first, int chunk_max, int split_chars) {
     Session s;
     std::thread worker([&] { speaker(conn, s, gpu); });
     event(conn, "ready", "\"sample_rate\":24000,\"format\":\"s16le\"");
@@ -211,7 +225,7 @@ void ws_connection(WsConn & conn, BreezeModel & model, MimiCodec & codec, VoiceS
         const std::string type = json_str(msg, "type");
 
         if (type == "start") {
-            handle_start(conn, s, msg, model, codec, store, chunk_first, chunk_max);
+            handle_start(conn, s, msg, model, codec, store, chunk_first, chunk_max, split_chars);
             continue;
         }
         if (!s.started) {
@@ -220,7 +234,7 @@ void ws_connection(WsConn & conn, BreezeModel & model, MimiCodec & codec, VoiceS
         }
         if (type == "instruction") {
             std::lock_guard<std::mutex> lock(s.mu);
-            // takes effect on the next piece, whatever is already being spoken finishes as it was
+            // applies to everything queued from here on, pieces already waiting keep theirs
             s.instruction = json_str(msg, "instruction");
             event(conn, "instruction_set");
         } else if (type == "text" || type == "flush" || type == "end") {
@@ -230,16 +244,19 @@ void ws_connection(WsConn & conn, BreezeModel & model, MimiCodec & codec, VoiceS
             // while there is no clip to clone the opening piece doubles as the reference, and a
             // long one makes the model skip sentences later, so it stays near a normal clip length
             const int budget = s.gen.needs_anchor() && s.queue.empty() ? 200 : s.budget;
-            for (std::string & p : drain(s.buffer, budget, force)) s.queue.push_back(p);
+            for (std::string & p : drain(s.buffer, budget, force))
+                s.queue.push_back({std::move(p), s.instruction});
             if (type == "end") s.ending = true;
             lock.unlock();
             s.cv.notify_one();
         } else if (type == "cancel") {
-            s.cancel = true;
             std::lock_guard<std::mutex> lock(s.mu);
             s.queue.clear();
             s.buffer.clear();
             s.ending = false;
+            // only latch it while something is actually being spoken, otherwise the flag
+            // sits true and swallows whatever gets sent next
+            s.cancel = s.speaking;
         } else {
             event(conn, "error", "\"message\":\"unknown type\"");
         }

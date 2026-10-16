@@ -20,6 +20,13 @@ a web UI, and a plain C shared library for bindings.
 
 English and Mandarin, 24 kHz, roughly 1.2x realtime at Q8_0 on an RTX 3060.
 
+## Demo
+
+Voice design, cloning, direction, vocal event tags, and voice conversion on a sung recording. Every
+clip was generated on one RTX 3060, faster than realtime, and nothing was cherry picked.
+
+https://github.com/user-attachments/assets/b63e4664-497f-4bac-b9e2-50bf571df30a
+
 ## Documentation
 
 <div align="center">
@@ -46,6 +53,21 @@ English and Mandarin, 24 kHz, roughly 1.2x realtime at Q8_0 on an RTX 3060.
 | **Voice cloning** | A reference clip and its transcript | New speech in that voice |
 | **Voice direction** | A reference clip plus an instruction | That voice, steered in tone or pace |
 | **Voice conversion** | A recording to respeak, and a target voice | The same performance in a different voice |
+
+## Download
+
+Prebuilt Vulkan builds for Windows and Linux (x64) are on the
+[releases page](https://github.com/HoppouAI/Breeze-TTS-2.cpp/releases). They run on NVIDIA, AMD and
+Intel GPUs with nothing else to install beyond a current GPU driver, and fall back to the CPU when
+there is no GPU. Unpack, grab a model from the [Weights](#weights) section, and run:
+
+```
+breeze-server breeze-tts-2-q8_0.gguf --webui
+```
+
+Then open http://localhost:8080/. The CPU side needs AVX2, which any x64 CPU from roughly 2013 onwards
+has. On Linux the Vulkan loader has to be installed, which it is on any desktop with GPU drivers set up
+(the package is `libvulkan1` on Debian and Ubuntu).
 
 ## Build
 
@@ -211,6 +233,10 @@ curl -X POST http://127.0.0.1:8080/v1/audio/speech \
 Use `--form-string` for text fields, not `-F`. A value starting with `(` makes `curl` build a
 multipart group instead of sending the text, which bites the moment you use a vocal event tag.
 
+The same endpoint takes OpenAI style JSON too, so SillyTavern and the OpenAI SDKs can use it as a
+drop in TTS provider, with MP3, WAV or PCM streamed back and server sent events if you ask for them.
+See [docs/server.md](docs/server.md#openai-compatible-requests).
+
 A WebSocket server also comes up on the HTTP port plus one. It takes text incrementally, streams audio
 back as it is produced, and supports changing the delivery instruction or cancelling mid sentence,
 which is what you want when driving it from a chat model. See [docs/websocket.md](docs/websocket.md).
@@ -249,6 +275,7 @@ the only external dependency.
 
 ## License
 
-Source code is [Apache 2.0](LICENSE). The Breeze TTS 2 model weights are governed by the BreezeBlue
+Source code is [Apache 2.0](LICENSE). The MP3 encoder in `third_party/shine` is a separate submodule under the
+LGPL 2.0. The Breeze TTS 2 model weights are governed by the BreezeBlue
 Research and Non-Commercial License. You are responsible for complying with the weight license and for
 obtaining consent for any reference audio or voices you use.

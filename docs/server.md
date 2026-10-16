@@ -7,7 +7,7 @@ rather than waiting for the whole clip.
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /health` | Liveness, sample rate, websocket port |
-| `POST /v1/audio/speech` | Generate speech, streamed |
+| `POST /v1/audio/speech` | Generate speech, streamed. Also takes OpenAI style JSON, see [OpenAI compatible requests](#openai-compatible-requests) |
 | `POST /v1/audio/convert` | Respeak a recording in another voice, see [voice-conversion.md](voice-conversion.md) |
 | `POST /v1/voices` | Register or save a reference voice, see [voices.md](voices.md) |
 | `GET /v1/voices` | List cached and saved voices |
@@ -21,7 +21,8 @@ changes and interruption. It is documented in [websocket.md](websocket.md).
 ```
 breeze-server <model.gguf> [--host H] [--port P] [--webui] [--cpu]
                            [--chunk-first N] [--chunk-max N] [--verbose]
-                           [--voices-dir PATH] [--ws-port P]
+                           [--voices-dir PATH] [--ws-port P] [--split-chars N]
+                           [--cors [ORIGINS]]
 ```
 
 | Flag | Default | Meaning |
@@ -35,6 +36,8 @@ breeze-server <model.gguf> [--host H] [--port P] [--webui] [--cpu]
 | `--verbose` | off | Add a per stage timing breakdown after each request. |
 | `--voices-dir` | `voices` | Folder of saved `.breeze` voices to load at startup. See [voices.md](voices.md). |
 | `--ws-port` | HTTP port + 1 | Port for streaming sessions. `-1` disables it. See [websocket.md](websocket.md). |
+| `--split-chars` | `600` | Default length long text is broken up at. `0` sends the whole thing through in one pass. A request can still override it. |
+| `--cors` | off | Let browser pages on other origins call the API. On its own it allows any origin; give a comma separated list to allow only those. See [Cross origin requests](#cross-origin-requests). |
 
 ```
 breeze-server breeze-tts-2-q4_k.gguf --port 8137 --webui
@@ -61,6 +64,34 @@ and anything above `1.00x` is faster than playback.
 There is no authentication and no rate limiting, on either the HTTP port or the
 WebSocket one. Do not expose them directly to the internet; put them behind a
 reverse proxy that handles both.
+
+## Cross origin requests
+
+The bundled web UI is served from the same origin as the API, so it needs
+nothing. A page served from anywhere else, a Vite dev server or a separate front
+end for instance, is blocked by the browser unless the server sends CORS
+headers. It does not by default. Turn them on with `--cors`:
+
+```
+breeze-server model.gguf --cors
+breeze-server model.gguf --cors http://localhost:5173,https://app.example.com
+```
+
+On its own the flag answers every origin with `Access-Control-Allow-Origin: *`.
+With a list it reflects the request's `Origin` only when it matches an entry
+exactly, scheme and port included, and adds `Vary: Origin` so caches keep the
+answers apart. An origin that is not on the list gets no CORS headers and the
+browser refuses the response.
+
+`X-Sample-Rate` and `X-Sample-Format` are listed in
+`Access-Control-Expose-Headers`, so a cross origin page can read the sample
+rate the same way the bundled UI does. Preflight `OPTIONS` requests, which the
+browser sends before `DELETE /v1/voices/<id>`, are answered with `204` and
+cached for a day.
+
+The WebSocket port is not affected. Browsers do not apply CORS to WebSockets,
+and the socket accepts a connection from any page regardless of this flag, as
+[websocket.md](websocket.md) notes.
 
 ## Streaming without stutter
 
@@ -193,7 +224,7 @@ Accepts `multipart/form-data` (needed for the reference audio upload) or
 | `top_k` | int | model default | Sampling top-k. `0` keeps the model default. |
 | `top_p` | float | model default | Sampling top-p. `0` keeps the model default. |
 | `repetition_penalty` | float | model default | Repetition penalty. `0` keeps the model default. |
-| `split_chars` | int | `600` | Long text is split on sentence boundaries into pieces of about this size and generated one at a time. `0` generates in one pass. |
+| `split_chars` | int | `--split-chars` | Long text is split on sentence boundaries into pieces of about this size and generated one at a time. `0` generates in one pass. |
 | `max_new_tokens` | int | model default | Frame cap per piece, 12.5 frames per second. `0` uses the model default of 750. |
 
 Every sampling field treats `0` as "use the model default", so leaving them out
@@ -203,7 +234,8 @@ There is no length limit on `text`. Anything past the budget is split and
 generated piece by piece, each conditioned on the first so the voice does not
 change partway. Generating minutes in a single pass is what `split_chars 0`
 does, and the model loses track of the text well before it runs out of frames,
-so leave splitting on unless you have a reason not to.
+so leave splitting on unless you have a reason not to. Starting the server with
+`--split-chars 0` turns it off for every request that does not set its own.
 
 ### Response
 
@@ -293,6 +325,121 @@ Convert to WAV:
 ```
 ffmpeg -f s16le -ar 24000 -ac 1 -i speech.pcm speech.wav
 ```
+
+## OpenAI compatible requests
+
+`POST /v1/audio/speech` also takes the JSON body of OpenAI's speech API, so
+apps built for it, like SillyTavern or the official OpenAI SDKs, can point at
+the server as they are. The `Content-Type` header decides which one you get:
+`application/json` gets the behaviour described here, a form post gets the
+native behaviour above.
+
+```
+curl http://127.0.0.1:8137/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{"model":"tts-1","input":"Hello from Breeze.","voice":"narrator","response_format":"mp3"}' \
+  -o speech.mp3
+```
+
+With the Python SDK:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8137/v1", api_key="unused")
+with client.audio.speech.with_streaming_response.create(
+    model="tts-1", voice="narrator", input="Streaming from the OpenAI SDK.",
+) as r:
+    r.stream_to_file("speech.mp3")
+```
+
+### Fields
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `input` | string | required | Text to speak, UTF-8. |
+| `voice` | string or `{"id": ...}` | none | A saved or cached voice, the same ids `voice_id` takes. Leave it out to design a voice from `instructions` instead. |
+| `instructions` | string | `Speak clearly and naturally.` | Voice description when designing, delivery direction when cloning. |
+| `response_format` | string | `mp3` | `mp3`, `wav` or `pcm`. `opus`, `aac` and `flac` are accepted but sent as WAV. |
+| `stream_format` | string | `audio` | `audio` streams the file itself, `sse` wraps it in server sent events. |
+| `model` | string | ignored | Accepted so clients that always send one keep working. |
+| `speed` | number | ignored | The model has no speed control. |
+
+The native fields `cfg_scale`, `seed`, `temperature`, `top_k`, `top_p`,
+`repetition_penalty`, `max_new_tokens` and `split_chars` are accepted as extra
+JSON fields, with the same meaning and defaults as above.
+
+OpenAI's own voice names such as `alloy` or `nova` are not built in, and a name
+the server does not know is a `404`. If a client insists on those names, save
+voices under them with `POST /v1/voices` (see [voices.md](voices.md)) and they
+work like any other.
+
+### Formats
+
+| `response_format` | Sent as | `Content-Type` |
+| --- | --- | --- |
+| `mp3` | MP3, 64 kbps mono at 24 kHz | `audio/mpeg` |
+| `wav` | 16 bit mono WAV at 24 kHz | `audio/wav` |
+| `pcm` | Headerless s16le mono at 24 kHz, the same as the native endpoint and OpenAI's own `pcm` | `audio/pcm` |
+| `opus`, `aac`, `flac` | WAV | `audio/wav` |
+
+Every format streams as it is generated, so playback can start on the first
+chunk. The WAV header goes out first with its length fields set to the maximum,
+because the length is not known yet. Browsers and ffmpeg read that to the end
+of the stream.
+
+MP3 is encoded with [shine](https://github.com/toots/shine), which builds from
+the `third_party/shine` submodule. A build without it, or one configured with
+`-DBREEZE_MP3=OFF`, sends WAV when asked for `mp3` as well. The console line for
+each request says what actually went out, for example `openai wav for opus`.
+
+### Server sent events
+
+With `"stream_format": "sse"` the response is `text/event-stream`. Each chunk
+arrives as a `speech.audio.delta` event carrying the next bytes of the file in
+`response_format`, base64 encoded, and a `speech.audio.done` event ends it.
+
+```
+data: {"type":"speech.audio.delta","audio":"//NIxAAAAAAAAAAAAFhpbmcAAAAPAAAA..."}
+
+data: {"type":"speech.audio.done","usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}
+```
+
+Decoding the deltas and joining them gives the same file a plain request
+returns. The token counts are always zero.
+
+### Errors
+
+Errors on this path use OpenAI's error shape, so clients show the message
+instead of a bare status code.
+
+```json
+{"error":{"message":"input is required","type":"invalid_request_error","param":null,"code":null}}
+```
+
+| Status | Cause |
+| --- | --- |
+| `400` | The body is not a JSON object, `input` is missing, or a field has the wrong type or an unknown value. |
+| `404` | `voice` is not a saved or cached voice. |
+| `409` | Another generation is already running. The OpenAI SDKs retry this on their own. |
+
+The `Authorization` header is ignored, so any API key works. That also means
+there is still no authentication, see the warning above.
+
+### SillyTavern
+
+Open the TTS extension, pick **OpenAI Compatible** as the provider and fill in:
+
+| Setting | Value |
+| --- | --- |
+| Provider Endpoint | `http://127.0.0.1:8137/v1/audio/speech` |
+| API Key | Anything, it is ignored. |
+| Model | Anything, it is ignored. |
+| Available Voices | The voice ids you want, comma separated, e.g. `narrator,harbour`. The list from `GET /v1/voices` has them all. |
+
+The default voice list is OpenAI's names, which will all come back `404` until
+you replace it. Speed does nothing. SillyTavern asks for MP3, which is what it
+gets.
 
 ## Streaming client sketch
 

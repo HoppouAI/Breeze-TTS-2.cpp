@@ -115,11 +115,16 @@ Leakage climbs steadily as sampling opens. The default is the cleanest
 separation. If a difficult source drops words, `--temp 0.6 --top-k 20` is a
 gentler middle ground than going all the way to the model's normal settings.
 
-## Melody does not survive by default
+## Melody is hit and miss
 
 Pitch is regenerated along with everything else, so the target voice supplies its
-own intonation. On a sung source that means the tune is lost. Measured against
-the original on a 12.7 s singing clip:
+own intonation rather than copying the source's. On a sung source the result is
+re-sung in the target's natural register instead of at the original pitch.
+
+Whether the tune actually survives varies a lot between clips, so test yours
+rather than trusting a rule. Two sources measured against their originals:
+
+A 12.7 s singing clip, where the tune was lost without help:
 
 | Path | Median F0 | Contour correlation |
 | --- | --- | --- |
@@ -128,14 +133,32 @@ the original on a 12.7 s singing clip:
 | Converted, `keep_acoustic 1` | 266.7 Hz | +0.580 |
 | Converted, `keep_acoustic 2` | 272.7 Hz | +0.725 |
 
+A 5.3 s pop vocal, where it came out clearly sung either way:
+
+| Path | Median F0 | Contour correlation |
+| --- | --- | --- |
+| Source | 229.7 Hz | |
+| Converted, `keep_acoustic 0` | 187.5 Hz | +0.065 |
+| Converted, `keep_acoustic 1` | 269.7 Hz | -0.208 |
+
+Note the second case: both takes were unmistakably singing on listening, yet the
+correlation numbers are near zero or negative. That is the transposition showing
+up. The take follows the shape of the tune in a different register, which a
+frame by frame pitch correlation scores as unrelated. **Judge this feature by
+ear. The correlation number alone will mislead you.**
+
 `keep_acoustic` copies that many low acoustic codebooks straight from the source
-instead of regenerating them. Pitch lives in the low ones, so 1 or 2 brings the
-melody back while the voice still comes out as the target.
+instead of regenerating them. Pitch lives in the low ones, so 1 or 2 pulls more
+of the original contour through while the voice still comes out as the target.
 
 Past 2 it gets unstable, and on ordinary speech it is worse than useless. The
 same setting applied to a spoken clip widened the pitch spread from 107 Hz to
-320 Hz and produced audible warbling. **Leave it at 0 for speech, try 1 or 2 for
-singing.**
+320 Hz and produced audible warbling. **Leave it at 0 for speech. For singing,
+try 0 first and reach for 1 or 2 if the tune flattens out.**
+
+Supplying `--text` matters more on singing than anywhere else. The same clip
+converted textless came back as "Does it pinch I? Send my tears", and with the
+lyrics passed in became "drink it up, I have no fear" exactly.
 
 ## Length
 

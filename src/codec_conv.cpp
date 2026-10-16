@@ -11,8 +11,12 @@ ggml_tensor * conv1d_causal(ggml_context * ctx, ggml_tensor * w, ggml_tensor * b
     const int K = (int) w->ne[0];
     int pad = (K - 1) * dilation - (stride - 1);
     if (pad < 0) pad = 0;
-    ggml_tensor * xp = ggml_pad_ext(ctx, x, pad, 0, 0, 0, 0, 0, 0, 0);
-    ggml_tensor * y = ggml_conv_1d(ctx, w, xp, stride, 0, dilation);
+    if (!ggml_is_contiguous(x)) x = ggml_cont(ctx, x);
+    const int64_t n_out = (x->ne[0] + pad - (int64_t) dilation * (K - 1) - 1) / stride + 1;
+    ggml_tensor * y = ggml_conv_1d(ctx, w, x, stride, pad, dilation);
+    if (y->ne[0] != n_out) {
+        y = ggml_cont(ctx, ggml_view_2d(ctx, y, n_out, y->ne[1], y->nb[1], 0));
+    }
     if (b) y = ggml_add(ctx, y, ggml_reshape_2d(ctx, b, 1, b->ne[0]));
     return y;
 }
@@ -40,7 +44,8 @@ ggml_tensor * depthwise1d_causal(ggml_context * ctx, ggml_tensor * w, ggml_tenso
                                  ggml_tensor * x, int K) {
     const int64_t L = x->ne[0];
     const int64_t C = x->ne[1];
-    ggml_tensor * xp = ggml_pad_ext(ctx, x, K - 1, 0, 0, 0, 0, 0, 0, 0);
+    ggml_tensor * xp = ggml_pad_ext(ctx, x, 0, K - 1, 0, 0, 0, 0, 0, 0);
+    xp = ggml_roll(ctx, xp, K - 1, 0, 0, 0);
     ggml_tensor * acc = nullptr;
     for (int k = 0; k < K; k++) {
         ggml_tensor * seg = ggml_cont(ctx, ggml_view_2d(ctx, xp, L, C, xp->nb[1], (size_t) k * xp->nb[0]));
