@@ -68,7 +68,7 @@ function(breeze_utf8 target)
     if(MSVC)
         target_sources(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cmake/utf8.manifest)
     elseif(MINGW)
-        target_sources(${target} PRIVATE ${BREEZE_UTF8_RC})
+        target_sources(${target} PRIVATE ${BREEZE_UTF8_RC} ${CMAKE_CURRENT_SOURCE_DIR}/apps/no_wildcard.c)
     endif()
 endfunction()
 
