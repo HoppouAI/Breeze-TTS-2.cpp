@@ -33,6 +33,13 @@ breeze-cli <model.gguf> --text <text> [options]
 
 Progress prints as `generated N.NN s` while the audio streams in.
 
+On Windows the binaries run in UTF-8 mode, so Chinese or any other non-ASCII
+text and file paths on the command line reach the model intact whatever the
+system language is set to. That needs Windows 10 version 1903 or newer. Older
+versions hand the program text in the system code page instead, and anything it
+cannot represent turns into `?`, so on those send non-ASCII text through the
+[server](server.md) instead, where it arrives as UTF-8.
+
 ## Latency
 
 `--timings` reports where the time goes:
