@@ -8,6 +8,7 @@ const bufferInput = document.getElementById("buffer");
 const bufferOut = document.getElementById("bufval");
 const stopBtn = document.getElementById("stop");
 let wsPort = 0;
+let voices = [];
 
 function syncBuffer() {
   bufferOut.textContent = Number(bufferInput.value).toFixed(2) + "s";
@@ -27,6 +28,7 @@ tabs.forEach(tab => {
     document.getElementById(tab.dataset.tab).classList.add("active");
     // conversion hands back the whole clip at once, so the streaming controls do nothing there
     document.querySelector(".output .row").classList.toggle("hide", tab.dataset.tab === "changer");
+    document.querySelector(".output").classList.toggle("hide", tab.dataset.tab === "library");
   });
 });
 
@@ -42,6 +44,12 @@ function syncVoice(panel) {
   if (!f.voice_id) return;
   const block = panel.querySelector(".refblock");
   if (block) block.classList.toggle("hide", !!f.voice_id.value);
+  const note = panel.querySelector(".voice-desc");
+  if (note) {
+    const v = voices.find(x => x.id === f.voice_id.value);
+    note.textContent = v ? v.description || "" : "";
+    note.classList.toggle("show", !!note.textContent);
+  }
 }
 
 async function loadVoices() {
@@ -50,6 +58,8 @@ async function loadVoices() {
     const res = await fetch("/v1/voices");
     if (res.ok) list = await res.json();
   } catch (e) { return; }
+  voices = list;
+  renderLibrary();
   document.querySelectorAll("select[data-f=voice_id]").forEach(sel => {
     const keep = sel.value;
     sel.innerHTML = "<option value=\"\">upload a clip instead</option>";
@@ -57,6 +67,7 @@ async function loadVoices() {
       const o = document.createElement("option");
       o.value = v.id;
       o.textContent = v.id + "  (" + v.seconds.toFixed(1) + "s)" + (v.saved ? "" : "  temporary");
+      if (v.description) o.title = v.description;
       sel.appendChild(o);
     }
     sel.value = list.some(v => v.id === keep) ? keep : "";
@@ -84,6 +95,8 @@ async function saveVoice(panel) {
     form.append("name", name);
     form.append("ref_audio", f.ref_audio.files[0]);
     form.append("ref_text", f.ref_text.value);
+    const desc = (f.save_desc.value || "").trim();
+    if (desc) form.append("description", desc);
     const res = await fetch("/v1/voices", { method: "POST", body: form });
     const body = await res.json();
     if (!res.ok) {
@@ -94,6 +107,7 @@ async function saveVoice(panel) {
       document.querySelectorAll("select[data-f=voice_id]").forEach(sel => { sel.value = body.id; });
       document.querySelectorAll(".panel").forEach(syncVoice);
       statusEl.textContent = "SAVED " + body.id + " - " + body.seconds.toFixed(2) + "s";
+      f.save_desc.value = "";
     }
   } catch (e) {
     statusEl.textContent = "ERROR: " + e.message;
@@ -442,6 +456,7 @@ async function convert(panel) {
 }
 
 document.querySelectorAll(".panel").forEach(panel => {
+  if (panel.id === "library") return;
   const btn = panel.querySelector(".go");
   btn.addEventListener("click", () => {
     if (panel.id === "changer") return convert(panel);
@@ -457,6 +472,178 @@ document.querySelectorAll(".panel").forEach(panel => {
 stopBtn.addEventListener("click", () => {
   if (liveSocket) liveSocket.send(JSON.stringify({ type: "cancel" }));
 });
+
+const libList = document.getElementById("liblist");
+const libFilter = document.getElementById("libfilter");
+const libCount = document.getElementById("libcount");
+const META_KEY = /^[A-Za-z0-9_.-]{1,64}$/;
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function matches(v, q) {
+  if (!q) return true;
+  const hay = [v.id, v.description, v.ref_text]
+    .concat(Object.entries(v.metadata || {}).map(([k, val]) => k + " " + val))
+    .join("\n").toLowerCase();
+  return hay.includes(q);
+}
+
+function useVoice(id) {
+  document.querySelectorAll("select[data-f=voice_id]").forEach(sel => { sel.value = id; });
+  document.querySelectorAll(".panel").forEach(syncVoice);
+  document.querySelector(".tab[data-tab=clone]").click();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function fieldRow(box, key, value, onChange) {
+  const row = el("div", "vfield");
+  const k = el("input");
+  k.type = "text";
+  k.placeholder = "field";
+  k.value = key;
+  const val = el("input");
+  val.type = "text";
+  val.placeholder = "value";
+  val.value = value;
+  const del = el("button", "ghost", "X");
+  del.title = "remove field";
+  del.addEventListener("click", () => { row.remove(); onChange(); });
+  k.addEventListener("input", onChange);
+  val.addEventListener("input", onChange);
+  row.append(k, val, del);
+  box.appendChild(row);
+  return row;
+}
+
+function voiceCard(v) {
+  const card = el("div", "vcard");
+  const head = el("div", "vhead");
+  head.append(el("span", "vname", v.id), el("span", "vtag", v.seconds.toFixed(1) + "s"),
+              el("span", "vtag" + (v.saved ? "" : " temp"), v.saved ? "SAVED" : "TEMPORARY"));
+  const use = el("button", "ghost", "USE");
+  use.title = "pick this voice in the clone tab";
+  use.addEventListener("click", () => useVoice(v.id));
+  head.appendChild(use);
+  card.appendChild(head);
+  if (v.ref_text) card.appendChild(el("p", "vtext", "\u201c" + v.ref_text + "\u201d"));
+
+  const label = el("label", "", "DESCRIPTION");
+  const desc = el("textarea");
+  desc.rows = 2;
+  desc.maxLength = 4096;
+  desc.placeholder = "what this voice sounds like, where it came from, what it is good for";
+  desc.value = v.description || "";
+  label.appendChild(desc);
+  card.appendChild(label);
+
+  const fieldsLabel = el("label", "", "EXTRA FIELDS");
+  card.appendChild(fieldsLabel);
+  const box = el("div", "vfields");
+  card.appendChild(box);
+
+  const actions = el("div", "vactions");
+  const add = el("button", "ghost", "+ FIELD");
+  const save = el("button", "go", "SAVE CHANGES");
+  const status = el("span", "vstatus", v.saved ? "" : "temporary voices lose their notes when the server restarts");
+  actions.append(add, save, status);
+  card.appendChild(actions);
+
+  const current = () => {
+    const meta = {};
+    let bad = "";
+    box.querySelectorAll(".vfield").forEach(row => {
+      const [k, val] = row.querySelectorAll("input");
+      const key = k.value.trim();
+      if (!key && !val.value.trim()) return;
+      if (!META_KEY.test(key) || key === "description") bad = bad || key || "(empty)";
+      else meta[key] = val.value;
+    });
+    return { description: desc.value, meta, bad };
+  };
+  const dirty = () => {
+    const c = current();
+    const before = v.metadata || {};
+    const same = c.description === (v.description || "") &&
+                 Object.keys(c.meta).length === Object.keys(before).length &&
+                 Object.keys(c.meta).every(k => before[k] === c.meta[k]);
+    card.classList.toggle("dirty", !same);
+    save.disabled = same;
+    if (!same) { status.classList.remove("err"); status.textContent = "unsaved changes"; }
+    else if (status.textContent === "unsaved changes") status.textContent = "";
+  };
+
+  for (const [k, val] of Object.entries(v.metadata || {})) fieldRow(box, k, val, dirty);
+  fieldsLabel.style.display = box.children.length ? "" : "none";
+  add.addEventListener("click", () => {
+    fieldsLabel.style.display = "";
+    fieldRow(box, "", "", dirty).querySelector("input").focus();
+  });
+  desc.addEventListener("input", dirty);
+  desc.addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !save.disabled) save.click(); });
+  save.disabled = true;
+
+  save.addEventListener("click", async () => {
+    const c = current();
+    if (c.bad) {
+      status.classList.add("err");
+      status.textContent = "field names are letters, digits, dot, dash or underscore: " + c.bad;
+      return;
+    }
+    const metadata = Object.assign({}, c.meta);
+    for (const k of Object.keys(v.metadata || {})) if (!(k in metadata)) metadata[k] = null;
+    save.disabled = true;
+    status.classList.remove("err");
+    status.textContent = "saving ...";
+    try {
+      const res = await fetch("/v1/voices/" + encodeURIComponent(v.id), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ description: c.description, metadata })
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || res.status);
+      Object.assign(v, body);
+      dirty();
+      status.textContent = v.saved ? "saved" : "updated until the server restarts";
+      document.querySelectorAll(".panel").forEach(syncVoice);
+      document.querySelectorAll("select[data-f=voice_id] option").forEach(o => {
+        if (o.value === v.id) o.title = v.description || "";
+      });
+    } catch (e) {
+      status.classList.add("err");
+      status.textContent = "error: " + e.message;
+      save.disabled = false;
+    }
+  });
+
+  card.dataset.id = v.id;
+  return card;
+}
+
+function renderLibrary() {
+  const q = (libFilter.value || "").trim().toLowerCase();
+  // keep cards with unsaved edits instead of wiping them on a refresh
+  const keep = new Map();
+  libList.querySelectorAll(".vcard.dirty").forEach(c => keep.set(c.dataset.id, c));
+  libList.textContent = "";
+  let shown = 0;
+  for (const v of voices) {
+    if (!matches(v, q)) continue;
+    libList.appendChild(keep.get(v.id) || voiceCard(v));
+    shown++;
+  }
+  libCount.textContent = !voices.length
+    ? "no voices yet, save one from the clone, direction or changer tab"
+    : shown === voices.length ? voices.length + " voices" : shown + " of " + voices.length + " voices";
+}
+
+libFilter.addEventListener("input", renderLibrary);
+document.getElementById("librefresh").addEventListener("click", loadVoices);
 
 async function loadHealth() {
   try {

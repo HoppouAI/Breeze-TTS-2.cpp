@@ -402,7 +402,7 @@ int run_server(const ServerOptions & opts) {
         });
         // an origin off the list still gets a 204, just without the header, so the browser refuses it
         svr.Options(".*", [](const httplib::Request & req, httplib::Response & res) {
-            res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+            res.set_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
             res.set_header("Access-Control-Max-Age", "86400");
             const std::string want = req.get_header_value("Access-Control-Request-Headers");
             if (!want.empty()) res.set_header("Access-Control-Allow-Headers", want);

@@ -17,6 +17,7 @@
   <button class="tab" data-tab="clone">VOICE CLONE</button>
   <button class="tab" data-tab="direction">VOICE DIRECTION</button>
   <button class="tab" data-tab="changer">VOICE CHANGER</button>
+  <button class="tab" data-tab="library">VOICE LIBRARY</button>
 </nav>
 
 <main>
@@ -41,12 +42,16 @@
     <label>SAVED VOICE
       <select data-f="voice_id"><option value="">upload a clip instead</option></select>
     </label>
+    <p class="voice-desc"></p>
     <div class="refblock">
       <label>REFERENCE AUDIO (WAV)
         <input data-f="ref_audio" type="file" accept="audio/*" />
       </label>
       <label>REFERENCE TRANSCRIPT (EXACT)
         <textarea data-f="ref_text" rows="2" placeholder="This is the exact transcript of the reference audio."></textarea>
+      </label>
+      <label>DESCRIPTION (OPTIONAL, SAVED WITH THE VOICE)
+        <textarea data-f="save_desc" rows="2" placeholder="Gravelly older narrator, slow and warm. Good for audiobooks."></textarea>
       </label>
       <div class="row saverow">
         <label>SAVE AS <input data-f="save_name" type="text" placeholder="my_voice" /></label>
@@ -69,12 +74,16 @@
     <label>SAVED VOICE
       <select data-f="voice_id"><option value="">upload a clip instead</option></select>
     </label>
+    <p class="voice-desc"></p>
     <div class="refblock">
       <label>REFERENCE AUDIO (WAV)
         <input data-f="ref_audio" type="file" accept="audio/*" />
       </label>
       <label>REFERENCE TRANSCRIPT (EXACT)
         <textarea data-f="ref_text" rows="2" placeholder="This is the exact transcript of the reference audio."></textarea>
+      </label>
+      <label>DESCRIPTION (OPTIONAL, SAVED WITH THE VOICE)
+        <textarea data-f="save_desc" rows="2" placeholder="Gravelly older narrator, slow and warm. Good for audiobooks."></textarea>
       </label>
       <div class="row saverow">
         <label>SAVE AS <input data-f="save_name" type="text" placeholder="my_voice" /></label>
@@ -96,12 +105,16 @@
     <label>SAVED VOICE
       <select data-f="voice_id"><option value="">upload a clip instead</option></select>
     </label>
+    <p class="voice-desc"></p>
     <div class="refblock">
       <label>TARGET VOICE (WAV)
         <input data-f="ref_audio" type="file" accept="audio/*" />
       </label>
       <label>TARGET VOICE TRANSCRIPT (EXACT)
         <textarea data-f="ref_text" rows="2" placeholder="This is the exact transcript of the target voice clip."></textarea>
+      </label>
+      <label>DESCRIPTION (OPTIONAL, SAVED WITH THE VOICE)
+        <textarea data-f="save_desc" rows="2" placeholder="Gravelly older narrator, slow and warm. Good for audiobooks."></textarea>
       </label>
       <div class="row saverow">
         <label>SAVE AS <input data-f="save_name" type="text" placeholder="my_voice" /></label>
@@ -116,6 +129,15 @@
       <label>SEED <input data-f="seed" type="number" value="42" /></label>
     </div>
     <button class="go">CONVERT</button>
+  </section>
+
+  <section class="panel" id="library">
+    <div class="row libbar">
+      <label>FILTER <input id="libfilter" type="text" placeholder="name, description, transcript or field" /></label>
+      <button id="librefresh" class="ghost">REFRESH</button>
+    </div>
+    <p class="note" id="libcount"></p>
+    <div id="liblist"></div>
   </section>
 
   <section class="output">
