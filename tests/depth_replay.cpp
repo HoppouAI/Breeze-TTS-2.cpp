@@ -170,6 +170,40 @@ static void test_depth(BreezeModel & m) {
     require(cached.steps.empty() && !cached.kv.buffer, "depth cache was not released");
 }
 
+static void test_fused(BreezeModel & m) {
+    const int nc = m.cfg.num_codebooks;
+    const int vs = m.cfg.audio_vocab_size;
+    std::mt19937 inputs(7);
+    for (int nb : {1, 2}) {
+        DepthRunner fused, stepped;
+        fused.init(m, nb);
+        stepped.init(m, nb);
+        for (int frame = 0; frame < 4; frame++) {
+            std::vector<std::vector<float>> hidden(nb, std::vector<float>(m.cfg.hidden_size));
+            for (auto & branch : hidden)
+                for (auto & x : branch) x = (static_cast<int>(inputs() % 201) - 100) * 0.01f;
+            const int cb0 = inputs() % vs;
+            for (int k : {1, 4}) {
+                SampleParams sp;
+                sp.top_k = k;
+                std::mt19937 rng(frame);
+                const auto codes = fused.run(m, hidden, cb0, 3.0f, rng, &sp);
+                require(fused.fused && fused.steps[0] == nullptr, "fused path was not taken");
+                stepped.run(m, hidden, cb0, 3.0f, rng, &sp, codes.data(), nc - 1);
+                for (int j = 0; j < nc - 1; j++) {
+                    const auto out = tensor_to_f32(stepped.steps[j]->logits);
+                    std::vector<float> l(out.begin(), out.begin() + vs);
+                    if (nb > 1)
+                        for (int i = 0; i < vs; i++) l[i] = out[vs + i] + 3.0f * (out[i] - out[vs + i]);
+                    int above = 0;
+                    for (int i = 0; i < vs; i++) above += l[i] > l[codes[j]];
+                    require(above < k, "fused code " + std::to_string(j) + " is outside the top " + std::to_string(k));
+                }
+            }
+        }
+    }
+}
+
 static void test_backbone(BreezeModel & m) {
     std::mt19937 rng(123);
     auto embeds = [&](int n) {
@@ -245,6 +279,7 @@ int main(int argc, char ** argv) {
             std::printf("testing %s with %s weights\n", fixture.model.backend.name(), quantized ? "Q8_0" : "F32");
             test_graph(fixture.model.backend);
             test_depth(fixture.model);
+            test_fused(fixture.model);
             test_backbone(fixture.model);
             test_swiglu(fixture.model);
         }
