@@ -14,6 +14,7 @@ breeze-cli <model.gguf> --text <text> [options]
 | `--ref-text <s>` | none | Exact transcript of the reference audio. Required with `--ref-audio`. |
 | `--voice <name>` | none | Use a saved voice instead of `--ref-audio`. See [voices.md](voices.md). |
 | `--save-voice <name>` | none | Encode `--ref-audio` into a reusable voice file and exit. |
+| `--description <s>` | none | Optional description stored with `--save-voice`. Edit it later in the web UI or over HTTP, see [voices.md](voices.md#descriptions-and-metadata). |
 | `--list-voices` | | List the saved voices and exit, without loading the model. |
 | `--voices-dir <path>` | `voices` | Where saved voices live. |
 | `--cfg-scale <f>` | `1.0` | Classifier free guidance. `1.0` disables it. |

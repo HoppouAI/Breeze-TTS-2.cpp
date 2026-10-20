@@ -57,6 +57,9 @@ curl -X POST http://127.0.0.1:8137/v1/voices \
 In the web UI, fill in the reference fields, type a name next to SAVE AS and
 press SAVE VOICE. It appears in the dropdown on every panel straight away.
 
+Any of the three can attach a description at the same time, see
+[Descriptions and metadata](#descriptions-and-metadata).
+
 Names allow letters, digits, dash and underscore, up to 64 characters. They
 become filenames, so anything looser would let a request write outside the
 folder.
@@ -91,21 +94,81 @@ breeze-cli model.gguf --list-voices
 
 ```
 harbour                    5.36 s  The harbour lights came on one by one as the evening tide began to turn.
+                                   Calm older narrator, slow and warm.
 young_woman                4.00 s  The harbour lights came on one by one as the evening tide began to turn.
 ```
+
+A voice with a description gets it on a second line.
 
 This one does not load the model, so it returns immediately.
 
 `GET /v1/voices` returns the same information as JSON, including the cached ones:
 
 ```json
-[{"id":"harbour","frames":67,"seconds":5.36,"encode_ms":0,"saved":true,"ref_text":"..."}]
+[{"id":"harbour","frames":67,"seconds":5.36,"encode_ms":0,"saved":true,"ref_text":"...",
+  "description":"Calm older narrator, slow and warm.","metadata":{"accent":"british"}}]
 ```
+
+`GET /v1/voices/<id>` returns a single voice in the same shape, or `404`.
 
 `DELETE /v1/voices/<id>` drops a voice from memory and answers with
 `{"deleted":"harbour","file_kept":true}`. It deliberately does **not** delete the
 file, so a saved voice returns on the next restart. Removing a voice for good
 means deleting the `.breeze` file yourself.
+
+## Descriptions and metadata
+
+Every voice can carry an optional description, plain text up to 4096 bytes, plus
+up to 32 extra fields of your own as name and value pairs. None of it affects
+generation. It is there so you can tell your voices apart and so other tools can
+filter them.
+
+Set a description when saving:
+
+```
+breeze-cli model.gguf --ref-audio reference.wav --ref-text "..." \
+  --save-voice harbour --description "Calm older narrator, slow and warm."
+```
+
+```
+curl -X POST http://127.0.0.1:8137/v1/voices \
+  -F "ref_audio=@reference.wav" \
+  --form-string "ref_text=This is the exact transcript of the reference audio." \
+  --form-string "name=harbour" \
+  --form-string "description=Calm older narrator, slow and warm." \
+  --form-string 'metadata={"accent":"british","source":"audiobook sample"}'
+```
+
+Saving over an existing name keeps its description and fields unless the new
+request sends its own.
+
+Change them later with `PATCH /v1/voices/<id>`, which takes JSON:
+
+```
+curl -X PATCH http://127.0.0.1:8137/v1/voices/harbour \
+  -H "Content-Type: application/json" \
+  -d '{"description":"Calm older narrator.","metadata":{"accent":"scottish","source":null}}'
+```
+
+Only what you send changes. `metadata` merges into the existing fields, and a
+field set to `null` or an empty string is removed. `"description": null` or
+`""` clears the description. The answer is the updated voice in the same shape
+as `GET`. Form fields work too, with `metadata` sent as a JSON string.
+
+Field names allow letters, digits, dot, dash and underscore, up to 64
+characters, and `description` is reserved. Values are strings of up to 1024
+bytes. A request that breaks any limit is a `400` and changes nothing.
+
+For a saved voice the `.breeze` file is rewritten straight away. A cached voice
+keeps its description in memory only, so it is lost on restart like the voice
+itself.
+
+In the web UI the **VOICE LIBRARY** tab lists every voice with its transcript.
+Edit the description, add or remove fields with **+ FIELD** and **X**, then press
+**SAVE CHANGES** (or Ctrl+Enter in the description). **USE** picks the voice in the
+clone tab. The description also shows under the SAVED VOICE dropdown whenever
+that voice is selected, and the save row on each panel has an optional
+description box.
 
 ## The `.breeze` file
 
@@ -115,13 +178,24 @@ A small binary container holding the encoded codes and the transcript. Roughly
 | Offset | Size | Contents |
 | --- | --- | --- |
 | 0 | 4 | Magic `BRZV` |
-| 4 | 4 | Format version, currently 1 |
+| 4 | 4 | Format version, 1 or 2 |
 | 8 | 4 | Sample rate the codes were made at |
 | 12 | 4 | Codebook count |
 | 16 | 4 | Frame count |
 | 20 | 4 | Transcript length in bytes |
 | 24 | n | Transcript, UTF-8 |
-| 24+n | frames × codebooks × 4 | Codes, little endian int32, frame major |
+| 24+n | | Version 2 only: the description and fields, see below |
+| | frames × codebooks × 4 | Codes, little endian int32, frame major |
+
+Version 2 inserts, after the transcript, a 4 byte description length and the
+description, a 4 byte field count, and then for each field a 4 byte name length,
+the name, a 4 byte value length and the value. All strings are UTF-8 and all
+lengths are little endian.
+
+A voice with no description and no fields is still written as version 1, so
+files that do not use metadata stay readable by v0.1.2 and older. A version 2
+file needs this build or newer. Edits write to a temporary file first and then
+replace the original, so a failed save cannot damage an existing voice.
 
 The codebook count is checked against the loaded model on startup. A voice made
 for a different model is skipped with a warning rather than loaded into garbage.

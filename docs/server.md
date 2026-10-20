@@ -11,6 +11,8 @@ rather than waiting for the whole clip.
 | `POST /v1/audio/convert` | Respeak a recording in another voice, see [voice-conversion.md](voice-conversion.md) |
 | `POST /v1/voices` | Register or save a reference voice, see [voices.md](voices.md) |
 | `GET /v1/voices` | List cached and saved voices |
+| `GET /v1/voices/<id>` | One voice, with its description and metadata |
+| `PATCH /v1/voices/<id>` | Change a voice's description and metadata, see [voices.md](voices.md#descriptions-and-metadata) |
 | `DELETE /v1/voices/<id>` | Drop a voice from memory |
 
 A separate WebSocket listener handles incremental text, mid stream direction
@@ -94,8 +96,8 @@ browser refuses the response.
 `X-Sample-Rate` and `X-Sample-Format` are listed in
 `Access-Control-Expose-Headers`, so a cross origin page can read the sample
 rate the same way the bundled UI does. Preflight `OPTIONS` requests, which the
-browser sends before `DELETE /v1/voices/<id>`, are answered with `204` and
-cached for a day.
+browser sends before `DELETE` and `PATCH` on `/v1/voices/<id>`, are answered
+with `204` and cached for a day.
 
 The WebSocket port is not affected. Browsers do not apply CORS to WebSockets,
 and the socket accepts a connection from any page regardless of this flag, as
