@@ -24,6 +24,7 @@ static void usage() {
            "  --ref-text <s>      exact transcript of the reference audio\n"
            "  --voice <name>      use a saved voice instead of --ref-audio\n"
            "  --save-voice <name> encode --ref-audio and save it as a reusable voice, then exit\n"
+           "  --description <s>   optional note stored with --save-voice\n"
            "  --list-voices       print the saved voices and exit\n"
            "  --voices-dir <path> where saved voices live (default voices)\n"
            "  --cfg-scale <f>     classifier free guidance scale (default 1.0)\n"
@@ -46,7 +47,7 @@ int main(int argc, char ** argv) {
     GenRequest req;
     req.instruction = "Speak clearly and naturally.";
     std::string ref_audio_path, output = "output.wav";
-    std::string voice_name, save_voice_name, voices_dir = "voices";
+    std::string voice_name, save_voice_name, voice_description, voices_dir = "voices";
     bool list_voices = false;
     bool use_gpu = true;
     bool show_timings = false;
@@ -59,6 +60,7 @@ int main(int argc, char ** argv) {
         else if (a == "--ref-text") req.ref_text = arg(argc, argv, i, "--ref-text");
         else if (a == "--voice") voice_name = arg(argc, argv, i, "--voice");
         else if (a == "--save-voice") save_voice_name = arg(argc, argv, i, "--save-voice");
+        else if (a == "--description") voice_description = arg(argc, argv, i, "--description");
         else if (a == "--list-voices") list_voices = true;
         else if (a == "--voices-dir") voices_dir = arg(argc, argv, i, "--voices-dir");
         else if (a == "--cfg-scale") req.cfg_scale = (float) atof(arg(argc, argv, i, "--cfg-scale"));
@@ -81,9 +83,11 @@ int main(int argc, char ** argv) {
     if (list_voices) {
         const std::vector<Voice> found = load_voice_dir(voices_dir);
         if (found.empty()) { printf("no voices in %s\n", voices_dir.c_str()); return 0; }
-        for (const Voice & v : found)
+        for (const Voice & v : found) {
             printf("%-24s %6.2f s  %s\n", v.name.c_str(),
                    (double) v.frames * 1920 / v.sample_rate, v.text.c_str());
+            if (!v.description.empty()) printf("%-24s           %s\n", "", v.description.c_str());
+        }
         return 0;
     }
 
@@ -108,6 +112,10 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "--save-voice needs --ref-audio and --ref-text\n");
             return 1;
         }
+        if (voice_description.size() > max_voice_description) {
+            fprintf(stderr, "--description is limited to %d bytes\n", (int) max_voice_description);
+            return 1;
+        }
     }
 
     BreezeModel model;
@@ -129,6 +137,7 @@ int main(int argc, char ** argv) {
         Voice v;
         v.name = save_voice_name;
         v.text = req.ref_text;
+        v.description = voice_description;
         v.sample_rate = model.cfg.sample_rate;
         v.n_codebooks = model.cfg.num_codebooks;
         v.codes = codec.encode(req.ref_audio, v.frames);
