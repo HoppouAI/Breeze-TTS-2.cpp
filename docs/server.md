@@ -22,7 +22,7 @@ changes and interruption. It is documented in [websocket.md](websocket.md).
 breeze-server <model.gguf> [--host H] [--port P] [--webui] [--cpu]
                            [--chunk-first N] [--chunk-max N] [--verbose]
                            [--voices-dir PATH] [--ws-port P] [--split-chars N]
-                           [--cors [ORIGINS]]
+                           [--cors [ORIGINS]] [--no-warmup]
 ```
 
 | Flag | Default | Meaning |
@@ -38,10 +38,18 @@ breeze-server <model.gguf> [--host H] [--port P] [--webui] [--cpu]
 | `--ws-port` | HTTP port + 1 | Port for streaming sessions. `-1` disables it. See [websocket.md](websocket.md). |
 | `--split-chars` | `600` | Default length long text is broken up at. `0` sends the whole thing through in one pass. A request can still override it. |
 | `--cors` | off | Let browser pages on other origins call the API. On its own it allows any origin; give a comma separated list to allow only those. See [Cross origin requests](#cross-origin-requests). |
+| `--no-warmup` | off | Skip the warm up at startup. See below. |
 
 ```
 breeze-server breeze-tts-2-q4_k.gguf --port 8137 --webui
 ```
+
+Before it starts listening the server runs a short throwaway generation, with
+and without guidance, and decodes a few sizes of audio chunk. That sets up the
+GPU pipelines the first real request would otherwise have to build, which on an
+RTX 3060 took that first request from around 640 ms to first audio down to
+around 300 ms, the same as every request after it. It adds about two seconds to
+startup. `--no-warmup` skips it.
 
 ## Console output
 
@@ -140,8 +148,31 @@ queue has to be deeper than the time it takes to produce a whole chunk. At
 so a client holding only 0.5 s of audio runs dry waiting for it, even though the
 average rate is comfortably ahead.
 
-The rule: **buffer more audio than the slowest chunk takes to produce.** For the
-defaults that means at least 1 s, and the bundled UI prebuffers 1.25 s.
+The server now handles most of this itself. It assumes playback starts the
+moment each chunk lands and keeps track of when that audio will run out. If
+waiting to fill the current chunk would leave the client with nothing to play,
+it sends the frames it already has early instead, and holds the chunk size until
+the cushion builds back up. It only does this when the short chunk plays for
+longer than it takes to generate and decode, because the vocoder re-decodes its
+context on every flush and a run of tiny chunks would fall further behind rather
+than catch up.
+
+Measured on an RTX 3060 at Q8_0 with a client that starts playing on the very
+first packet and buffers nothing, reading a 21 second passage at `cfg_scale` 3,
+the slowest common case:
+
+| `--chunk-max` | Before | Now |
+| --- | --- | --- |
+| 25 | 5 gaps, 222 ms of silence | none |
+| 40 | 6 gaps, 308 ms | 1 gap, 73 ms |
+| 60 | 7 gaps, 442 ms | 1 gap, 18 ms |
+
+Without guidance there were no gaps either way. The extra flushes cost a few
+percent of throughput under guidance, 1.17x against 1.22x at the default.
+
+The old rule still gives the most margin: **buffer more audio than the slowest
+chunk takes to produce.** The bundled UI prebuffers 1.25 s. It just matters much
+less now, and a client that cannot buffer at all will mostly get away with it.
 
 Note the difference between prebuffering and delaying. Starting the first chunk
 half a second late does not create a cushion, it only shifts the start; the queue
@@ -179,7 +210,8 @@ Setting both flags to the same value disables the ramp and streams a fixed size.
 ### Summary
 
 - Aim for `--chunk-max 40` unless you are on a fast device and want a finer stream.
-- Buffer at least 1 s on the client, more if you raised `--chunk-max`.
+- The server sends early when a client is about to run dry, so a small buffer is
+  enough. Around 1 s still gives the most margin under guidance.
 - Prebuffer by fill level, not by delay.
 - Check the real time factor first if it stutters no matter what you buffer.
 
