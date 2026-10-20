@@ -100,9 +100,13 @@ breeze-quantize breeze-tts-2-f16.gguf breeze-tts-2-q4_k-dd2.gguf q4_k --depth q2
 ```
 
 This buys throughput cheaply. The depth decoder runs 15 sequential single token
-passes per frame and is the largest single cost in generation, but almost all of
-that is fixed dispatch overhead rather than weight reading, so shrinking it costs
-little time. Measured on an RTX 3060 over five runs, median:
+passes per frame and is the largest single cost in generation. The table below
+was measured before the depth decoder moved to one graph per frame, when most of
+its time was dispatch overhead. That overhead is gone now and what remains is
+mostly weight reading, so every row is faster than shown and a smaller depth type
+should save more than this suggests. With the current build Q8_0 with a Q4_K depth
+decoder spends 23.86 ms per frame in depth. Measured on an RTX 3060 over five
+runs, median, before the change:
 
 | Model | Depth type | Size | Depth per frame | Total per frame | Real time factor |
 | --- | --- | --- | --- | --- | --- |

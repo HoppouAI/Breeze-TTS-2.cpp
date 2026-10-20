@@ -57,8 +57,8 @@ time to first audio 364 ms over 7 flushes
 ```
 
 The depth decoder dominates because it runs 15 sequential single token passes
-per frame, each needing its own GPU round trip. Everything else is small by
-comparison.
+per frame. They go to the GPU as one graph, but each pass still waits on the code
+the one before it picked. Everything else is small by comparison.
 
 Audio is flushed in growing chunks, starting at 4 frames so playback can begin
 early and growing to 25 frames so the vocoder stays efficient. That keeps time

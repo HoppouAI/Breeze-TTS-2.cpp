@@ -69,6 +69,13 @@ Position `p` for `p >= 1` takes the token of codebook `p - 1`, offset by
 position use head `p - 1`. The head weight is a `(15, 2051, 1024)` tensor sliced
 per codebook.
 
+All 15 steps and their sampling are built into one graph, so a frame is one
+submit and one tiny readback instead of 15 round trips. Inside that graph the KV
+cache just grows by concat. Sampling is top-k plus Gumbel noise that the CPU draws
+from the seed up front, which gives the same distribution as softmax sampling over
+the top k. Top-p below 1, forced codes and top-k above 256 fall back to one graph
+per step.
+
 ## Vocoder
 
 The vocoder is `Qwen3TTSTokenizerV2`, loaded from the `audio_tokenizer/`
@@ -113,10 +120,9 @@ instruction. Logits combine as:
 
 $$\text{logits} = \text{uncond} + s \cdot (\text{cond} - \text{uncond})$$
 
-The depth decoder runs both branches in **one graph**, not two. Its cost is
-dominated by dispatch overhead rather than arithmetic, so a second branch that
-rides along in the same dispatches is close to free: 33.73 ms per frame at
-`cfg_scale` 1 against 40.76 ms at 4, a 21% increase rather than a doubling.
+The depth decoder runs both branches in **one graph**, not two. Each weight is
+read once for both branches, so the second one costs about 40% rather than a
+doubling: 23.86 ms per frame at `cfg_scale` 1 against 33.21 ms at 3.
 
 The two branches share one KV cache, interleaved as
 `slot = pos * n_branch + branch`. That keeps the tokens written each step
@@ -126,14 +132,15 @@ blind to the other.
 
 The backbone still runs its branches separately, because the conditioned and
 unconditioned prompts have different lengths and do not interleave cleanly. That
-is the remaining cost of guidance, worth about 6 ms per frame.
+is the remaining cost of guidance, worth about 4 ms per frame.
 
-Measured end to end for voice direction with a cloned reference on an RTX 3060:
+Measured end to end for voice design on an RTX 3060, Q8_0 with a Q4_K depth
+decoder:
 
 | `cfg_scale` | Backbone | Depth | Vocoder | Total per frame | Real time factor |
 | --- | --- | --- | --- | --- | --- |
-| 1 | 8.26 ms | 33.73 ms | 11.79 ms | 53.78 ms | 1.49x |
-| 4 | 14.58 ms | 40.76 ms | 11.06 ms | 66.40 ms | 1.20x |
+| 1 | 9.95 ms | 23.86 ms | 13.04 ms | 46.85 ms | 1.71x |
+| 3 | 13.81 ms | 33.21 ms | 13.72 ms | 60.74 ms | 1.32x |
 
 Cloning adds a one off reference encode of roughly 650 ms, which lands on time to
 first audio and not on throughput.
@@ -165,25 +172,23 @@ ahead of playback.
 
 ## Where the time goes
 
-Measured on an RTX 3060 at Q8_0, per frame of audio (80 ms):
+Measured on an RTX 3060 at Q8_0 with a Q4_K depth decoder, per frame of audio
+(80 ms):
 
 | Stage | Per frame | Share |
 | --- | --- | --- |
-| Backbone decode | 9.9 ms | 15% |
-| Depth decode | 42.1 ms | 63% |
-| Vocoder | 13.2 ms | 20% |
+| Backbone decode | 9.95 ms | 21% |
+| Depth decode | 23.86 ms | 51% |
+| Vocoder | 13.04 ms | 28% |
 
 The depth decoder dominates because it runs 15 sequential steps per frame, one
 per codebook, and each step is a full 12 layer forward pass over a single token.
 
-It is bound by dispatch count, not arithmetic. Splitting `Graph::compute` over a
-whole clip attributes 4.5% to graph allocation, 7.1% to input uploads and 80% to
-`ggml_backend_graph_compute`, while the GPU reports 63% mean utilisation. The
-work per dispatch is tiny and there are roughly 180 of them per step, so the
-device spends much of its time between kernels rather than inside them. The
-reference implementation reaches for CUDA graphs on exactly this module; ggml's
-Vulkan backend has no equivalent, and the single shared backend and allocator
-rule out overlapping stages across threads.
+It used to be bound by dispatch count, with a CPU round trip per step and the GPU
+idle between them. With the whole frame in one graph that overhead is gone, and
+the Vulkan profiler puts about 26 ms of kernel time on each frame, most of it in
+the FFN matmuls. What is left is reading the depth decoder's weights 15 times per
+frame, so the depth type now matters more for speed than it used to.
 
 ## ggml notes
 

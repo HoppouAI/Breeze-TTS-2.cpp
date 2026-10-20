@@ -18,7 +18,7 @@ running on [ggml](https://github.com/ggml-org/ggml). The Vulkan backend means it
 AMD and Intel GPUs, and it falls back to CPU. Ships a CLI, a streaming HTTP and WebSocket server with
 a web UI, and a plain C shared library for bindings.
 
-English and Mandarin, 24 kHz, roughly 1.2x realtime at Q8_0 on an RTX 3060.
+English and Mandarin, 24 kHz, roughly 1.5x realtime at Q8_0 on an RTX 3060, 1.3x with guidance.
 
 ## Demo
 

@@ -121,13 +121,13 @@ curl -s -o out.pcm -w "%{time_total}\n" \
 ```
 
 Audio seconds are `bytes / 2 / 24000`, so the factor is that divided by
-`time_total`. On an RTX 3060 a long clip measures about 1.29x at Q4_K and 1.18x
-at Q8_0 with the defaults. Those are thin margins. A busy GPU eats them.
+`time_total`. On an RTX 3060 a long clip measures about 1.8x at Q4_K and 1.5x
+at Q8_0 with the defaults. A busy GPU still eats into that.
 
 Guidance costs less than it looks like it should. `cfg_scale` above 1 adds a
 second forward pass, but the depth decoder batches both branches into one graph,
-so voice direction with a cloned reference measures 1.49x at `cfg_scale` 1 and
-1.20x at 4, still comfortably above realtime. Cloning also adds a one off
+so a 26 second passage at `cfg_scale` 3 measures 1.44x at Q4_K and 1.31x at
+Q8_0, still comfortably above realtime. Cloning also adds a one off
 reference encode of roughly 650 ms, which shows up in time to first audio rather
 than in the rate.
 
@@ -161,14 +161,15 @@ Measured on an RTX 3060 at Q8_0 with a client that starts playing on the very
 first packet and buffers nothing, reading a 21 second passage at `cfg_scale` 3,
 the slowest common case:
 
-| `--chunk-max` | Before | Now |
-| --- | --- | --- |
-| 25 | 5 gaps, 222 ms of silence | none |
-| 40 | 6 gaps, 308 ms | 1 gap, 73 ms |
-| 60 | 7 gaps, 442 ms | 1 gap, 18 ms |
+| `--chunk-max` | Before | Early flushing | Plus the one graph depth decoder |
+| --- | --- | --- | --- |
+| 25 | 5 gaps, 222 ms of silence | none | none |
+| 40 | 6 gaps, 308 ms | 1 gap, 73 ms | none |
+| 60 | 7 gaps, 442 ms | 1 gap, 18 ms | none |
 
-Without guidance there were no gaps either way. The extra flushes cost a few
-percent of throughput under guidance, 1.17x against 1.22x at the default.
+Without guidance there were no gaps in any of them. The early flushes cost a few
+percent of throughput under guidance, 1.17x against 1.22x at the default, and the
+faster depth decoder more than wins it back at 1.33x.
 
 The old rule still gives the most margin: **buffer more audio than the slowest
 chunk takes to produce.** The bundled UI prebuffers 1.25 s. It just matters much
@@ -189,7 +190,8 @@ grows by a third each flush until it reaches `--chunk-max`.
 Every flush also re-decodes `sliding_window + 16` frames of left context and
 throws that audio away, so small chunks are expensive. At 25 frames the vocoder
 decodes 113 frames to emit 25. Raising the ceiling reclaims most of it, measured
-on an RTX 3060 at Q8_0:
+on an RTX 3060 at Q8_0 before the depth decoder got faster, so today's totals are
+lower but the vocoder column still holds:
 
 | `--chunk-max` | Vocoder per frame | Total per frame | Real time factor |
 | --- | --- | --- | --- |
