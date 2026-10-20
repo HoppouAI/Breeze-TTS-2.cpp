@@ -83,7 +83,7 @@ struct ChunkRef {
 static bool generate_chunk(BreezeModel & m, MimiCodec & codec, const GenRequest & req,
                            const std::string & text, const ChunkRef & ref, uint32_t seed,
                            const AudioCallback & cb, GenTimings & tm,
-                           std::chrono::steady_clock::time_point t_start, ChunkRef & out) {
+                           std::chrono::steady_clock::time_point t_start, PlayClock & clock, ChunkRef & out) {
     const auto clock_now = [] { return std::chrono::steady_clock::now(); };
     const auto since = [](std::chrono::steady_clock::time_point t) {
         return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
@@ -140,11 +140,25 @@ static bool generate_chunk(BreezeModel & m, MimiCodec & codec, const GenRequest 
     int chunk = std::min(std::max(1, req.chunk_first), chunk_max);
     // the transformer window plus the slack the vocoder convolutions reach back over
     const int ctx = m.cfg.voc.sliding_window + 16;
+    const double frame_audio_ms = 1000.0 * spf / m.cfg.sample_rate;
+    const auto ema = [](double & avg, double v) { avg = avg > 0 ? avg * 0.7 + v * 0.3 : v; };
+    // a flush has to start while the listener still has enough left to cover decoding it
+    const auto due_early = [&](int pending) {
+        if (!req.pace || !clock.started || clock.voc_ms <= 0) return false;
+        const int span = emitted + pending - (emitted > ctx ? emitted - ctx : 0);
+        // generating and decoding it has to take well under what it plays, or small flushes spiral
+        if (pending * clock.frame_ms + 1.2 * clock.voc_ms * span >= pending * frame_audio_ms) return false;
+        const double left = std::chrono::duration<double, std::milli>(clock.runs_out - clock_now()).count();
+        return left < 1.25 * (clock.frame_ms + clock.voc_ms * (span + 1)) + 100.0;
+    };
     auto flush = [&](bool final_flush) {
         const int have = (int) frames.size() / nc;
-        while (have - emitted >= chunk || (final_flush && have > emitted)) {
+        while (have > emitted) {
+            const bool full = final_flush || have - emitted >= chunk;
+            const bool early = !full && due_early(have - emitted);
+            if (!full && !early) break;
             const int start = emitted;
-            const int count = final_flush ? have - emitted : chunk;
+            const int count = full && !final_flush ? chunk : have - emitted;
             const int ctx_start = start > ctx ? start - ctx : 0;
             const int sub_T = start + count - ctx_start;
             std::vector<int> sub(frames.begin() + (size_t) ctx_start * nc, frames.begin() + (size_t) (start + count) * nc);
@@ -152,6 +166,7 @@ static bool generate_chunk(BreezeModel & m, MimiCodec & codec, const GenRequest 
             std::vector<float> audio = codec.decode(sub, sub_T);
             const double vtime = since(tv);
             tm.vocoder += vtime;
+            ema(clock.voc_ms, vtime / sub_T);
             tm.flushes++;
             const int skip = (start - ctx_start) * spf;
             if (!tm.first_audio) {
@@ -160,9 +175,13 @@ static bool generate_chunk(BreezeModel & m, MimiCodec & codec, const GenRequest 
                 tm.first_audio = since(t_start);
             }
             if (!cb(audio.data() + skip, count * spf)) return false;
+            const auto now = clock_now();
+            if (!clock.started || clock.runs_out < now) clock.runs_out = now;
+            clock.runs_out += std::chrono::microseconds((long long) (count * frame_audio_ms * 1000.0));
+            clock.started = true;
             emitted += count;
-            chunk = std::min(chunk + chunk / 3 + 1, chunk_max);
-            if (!final_flush && have - emitted < chunk) break;
+            // an early flush means the buffer is thin, so the chunk holds its size until it recovers
+            if (!early) chunk = std::min(chunk + chunk / 3 + 1, chunk_max);
         }
         return true;
     };
@@ -173,7 +192,8 @@ static bool generate_chunk(BreezeModel & m, MimiCodec & codec, const GenRequest 
         if (use_cfg) hiddens.push_back(o_u.hidden);
         auto td = clock_now();
         std::vector<int> depth_codes = depth.run(m, hiddens, cb0, req.cfg_scale, rng);
-        tm.depth += since(td);
+        const double depth_ms = since(td);
+        tm.depth += depth_ms;
         std::vector<int> frame = { cb0 };
         frame.insert(frame.end(), depth_codes.begin(), depth_codes.end());
 
@@ -195,7 +215,9 @@ static bool generate_chunk(BreezeModel & m, MimiCodec & codec, const GenRequest 
         } else {
             o_c = backbone_run(m, st_c, ae, 1);
         }
-        tm.backbone += since(tb);
+        const double backbone_ms = since(tb);
+        tm.backbone += backbone_ms;
+        ema(clock.frame_ms, depth_ms + backbone_ms);
         comb = combine_logits(o_c.logits, o_u.logits, use_cfg, req.cfg_scale);
         cb0 = sample_token(comb, bp, rng, &hist, &suppress);
     }
@@ -217,6 +239,7 @@ void GenSession::begin(BreezeModel & m, MimiCodec & codec, const GenRequest & re
     m_req = req;
     m_piece = 0;
     m_start = std::chrono::steady_clock::now();
+    m_clock = PlayClock();
     m_codes.clear();
     m_frames = 0;
     m_text.clear();
@@ -246,7 +269,7 @@ bool GenSession::speak(const std::string & text, const AudioCallback & cb, GenTi
 
     ChunkRef made;
     const bool ok = generate_chunk(*m_model, *m_codec, m_req, text, anchor,
-                                   (uint32_t) m_req.seed + m_piece, cb, t, m_start, made);
+                                   (uint32_t) m_req.seed + m_piece, cb, t, m_start, m_clock, made);
     m_piece++;
     // the opening piece stands in as the reference when there was no clip to clone
     if (ok && m_codes.empty() && made.n_frames > 0) {
@@ -275,6 +298,25 @@ void generate(BreezeModel & m, MimiCodec & codec, const GenRequest & req, const 
 
     for (const std::string & part : parts)
         if (!s.speak(part, cb, &tm)) return;
+}
+
+void warm_up(BreezeModel & m, MimiCodec & codec, const GenRequest & base) {
+    GenRequest req = base;
+    req.text = "Warming up.";
+    req.instruction = GenRequest().instruction;
+    req.max_new_tokens = 24;
+    req.pace = false;
+    const AudioCallback drop = [](const float *, int) { return true; };
+    generate(m, codec, req, drop);
+    req.cfg_scale = 2.0f;
+    req.max_new_tokens = 8;
+    generate(m, codec, req, drop);
+    // vulkan picks matmul pipelines by size class, so touch the spread of chunk lengths a stream uses
+    const int nc = m.cfg.num_codebooks;
+    for (int T : { 1, 2, 4, 8, 16, 32, 64, m.cfg.voc.sliding_window + 16 + std::max(1, base.chunk_max) }) {
+        std::vector<int> codes((size_t) T * nc, 0);
+        codec.decode(codes, T);
+    }
 }
 
 // keeps the source's semantic codes and rebuilds the acoustic ones in the reference voice. the words

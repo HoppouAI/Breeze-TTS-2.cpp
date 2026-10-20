@@ -118,6 +118,20 @@ int run_server(const ServerOptions & opts) {
     printf("backend: %s, sample rate: %d\n", model.backend.name(), model.cfg.sample_rate);
     MimiCodec codec;
     codec.init(model);
+    if (opts.warmup) {
+        printf("warming up ...\n");
+        fflush(stdout);
+        const auto tw = std::chrono::steady_clock::now();
+        GenRequest base;
+        base.chunk_first = opts.chunk_first;
+        base.chunk_max = opts.chunk_max;
+        try {
+            warm_up(model, codec, base);
+            printf("warmed up in %.1f s\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - tw).count());
+        } catch (const std::exception & e) {
+            fprintf(stderr, "warm up failed: %s\n", e.what());
+        }
+    }
 
     httplib::Server svr;
     auto mutex = std::make_shared<std::mutex>();

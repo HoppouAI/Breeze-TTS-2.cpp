@@ -77,6 +77,7 @@ int breeze_generate(breeze_context * ctx, const breeze_request * req, breeze_aud
 int breeze_generate_wav(breeze_context * ctx, const breeze_request * req, const char * out_path) {
     try {
         GenRequest g = to_req(req);
+        g.pace = false;
         std::vector<float> audio;
         generate(ctx->model, ctx->codec, g, [&](const float * s, int n) {
             audio.insert(audio.end(), s, s + n);

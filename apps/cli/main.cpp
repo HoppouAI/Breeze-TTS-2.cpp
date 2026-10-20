@@ -140,6 +140,7 @@ int main(int argc, char ** argv) {
         return 0;
     }
 
+    req.pace = false;
     std::vector<float> audio;
     int frames = 0;
     GenTimings tm;

@@ -32,9 +32,18 @@ struct GenRequest {
     // frames per streamed chunk, ramping from first to max. set both the same for a fixed size
     int chunk_first = 4;
     int chunk_max = 25;
-    // long text is generated in pieces of about this many characters, 0 keeps it in one pass.
-    // the model loses track of the text somewhere past a minute of audio, so pieces stay under that
+    // the model loses track of the text past about a minute of audio, 0 keeps it in one pass
     int split_chars = 600;
+    // send a short chunk early when the listener is about to run dry, pointless when writing a file
+    bool pace = true;
+};
+
+// when the listener's audio runs out, assuming playback starts the moment a chunk lands
+struct PlayClock {
+    bool started = false;
+    std::chrono::steady_clock::time_point runs_out;
+    double frame_ms = 0; // backbone plus depth per frame
+    double voc_ms = 0;   // vocoder per decoded frame, context included
 };
 
 // break text on sentence boundaries into pieces worth roughly budget characters, cjk counted heavier.
@@ -80,8 +89,10 @@ struct GenTimings {
 void generate(BreezeModel & m, MimiCodec & codec, const GenRequest & req, const AudioCallback & cb,
               GenTimings * timings = nullptr);
 
-// generation spread over several calls, for text that arrives a bit at a time. it holds the
-// reference so the voice does not drift between pieces, and the instruction can change as it goes
+// runs a throwaway generation so the first real request doesnt pay for pipeline setup
+void warm_up(BreezeModel & m, MimiCodec & codec, const GenRequest & base);
+
+// text that arrives a bit at a time, the reference and play clock carry over between pieces
 class GenSession {
 public:
     void begin(BreezeModel & m, MimiCodec & codec, const GenRequest & req, GenTimings * tm = nullptr);
@@ -103,6 +114,7 @@ private:
     int m_frames = 0;
     uint32_t m_piece = 0;
     std::chrono::steady_clock::time_point m_start;
+    PlayClock m_clock;
 };
 
 }
