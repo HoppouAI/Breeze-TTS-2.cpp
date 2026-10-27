@@ -17,7 +17,6 @@ void Backend::init(bool prefer_gpu) {
         backend = ggml_backend_cpu_init();
         is_gpu = false;
     }
-    alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
 }
 
 const char * Backend::name() const {
@@ -25,9 +24,7 @@ const char * Backend::name() const {
 }
 
 void Backend::free() {
-    if (alloc) ggml_gallocr_free(alloc);
     if (backend) ggml_backend_free(backend);
-    alloc = nullptr;
     backend = nullptr;
 }
 
@@ -89,9 +86,10 @@ void Graph::compute(Backend & be, ggml_tensor * out) {
     ggml_set_output(out);
     for (ggml_tensor * r : extra_roots) ggml_build_forward_expand(gf, r);
     ggml_build_forward_expand(gf, out);
-    if (!ggml_gallocr_alloc_graph(be.alloc, gf)) {
-        ggml_gallocr_free(be.alloc);
-        be.alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(be.backend));
+    if (!alloc) alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(be.backend));
+    if (!ggml_gallocr_alloc_graph(alloc, gf)) {
+        ggml_gallocr_free(alloc);
+        alloc = nullptr;
         throw std::runtime_error("could not allocate inference graph");
     }
     for (auto & pr : pending) {

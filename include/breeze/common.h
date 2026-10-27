@@ -14,7 +14,6 @@ namespace breeze {
 // one compute backend (any GPU ggml was built with, else CPU) shared by all graphs
 struct Backend {
     ggml_backend_t backend = nullptr;
-    ggml_gallocr_t alloc = nullptr;
     bool is_gpu = false;
 
     void init(bool prefer_gpu);
@@ -35,7 +34,8 @@ struct KVCache {
     void free();
 };
 
-// inputs are uploaded after allocation; prepared graphs own their scratch buffers
+// inputs are uploaded after allocation; each graph owns the scratch buffer for its own shape,
+// and prepared graphs keep theirs alive across replays
 struct Graph {
     ggml_context * ctx = nullptr;
     ggml_cgraph * gf = nullptr;
