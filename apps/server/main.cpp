@@ -8,7 +8,7 @@ using namespace breeze;
 
 int main(int argc, char ** argv) {
     if (argc < 2 || !strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")) {
-        printf("usage: breeze-server <model.gguf> [--host H] [--port P] [--webui] [--cpu]\n");
+        printf("usage: breeze-server <model.gguf> [--host H] [--port P] [--webui] [--cpu] [--te-cpu]\n");
         printf("                     [--chunk-first N] [--chunk-max N] [--verbose]\n");
         printf("                     [--voices-dir PATH] [--ws-port P] [--split-chars N]\n");
         printf("                     [--cors [ORIGINS]] [--no-warmup] [--parallel N]\n");
@@ -26,6 +26,8 @@ int main(int argc, char ** argv) {
         printf("  --cors         let browser pages on other origins call the api. on its own it allows\n");
         printf("                 any origin, or give a comma separated list like\n");
         printf("                 http://localhost:5173,https://app.example.com to allow only those\n");
+        printf("  --te-cpu       run the text encoder on the cpu, saving about 0.9 gb of video memory\n");
+        printf("                 for about half a second more before the first audio\n");
         printf("  --parallel N   streams generating at once (default 1), more than that get told the\n");
         printf("                 server is busy. a stream using cfg counts as two\n");
         printf("  --no-warmup    skip the short throwaway generation at startup, the first request\n");
@@ -43,6 +45,7 @@ int main(int argc, char ** argv) {
         else if (a == "--voices-dir" && i + 1 < argc) opts.voices_dir = argv[++i];
         else if (a == "--ws-port" && i + 1 < argc) opts.ws_port = atoi(argv[++i]);
         else if (a == "--cpu") opts.use_gpu = false;
+        else if (a == "--te-cpu") opts.te_cpu = true;
         else if (a == "--chunk-first" && i + 1 < argc) opts.chunk_first = atoi(argv[++i]);
         else if (a == "--chunk-max" && i + 1 < argc) opts.chunk_max = atoi(argv[++i]);
         else if (a == "--split-chars" && i + 1 < argc) opts.split_chars = atoi(argv[++i]);

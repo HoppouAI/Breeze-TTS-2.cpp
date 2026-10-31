@@ -156,3 +156,11 @@ the model loads on CPU instead, just slowly.
 **Out of video memory** during generation: use a smaller quantization. Q4_K
 needs roughly 3 GB of VRAM against about 7 GB for F16. See
 [models.md](models.md).
+
+If that is still too much, for instance next to a local LLM on a 6 GB card,
+`--te-cpu` (or `BREEZE_TE_CPU=1` for the C API and the Python bindings) keeps
+the T5Gemma2 text encoder in system memory and runs it on the CPU. It runs
+once per prompt, so the cost is a short delay before the first audio rather
+than a slower stream. On an RTX 2060 with Q4_K and a Q2_K depth decoder,
+peak video memory went from 2725 MB to 1811 MB and the first audio from about
+0.2 s to 0.75 s (the encoder took about 0.5 s on 6 threads).

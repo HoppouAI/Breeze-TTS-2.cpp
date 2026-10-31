@@ -67,7 +67,7 @@ std::vector<float> text_encoder_forward(BreezeModel & m, const std::vector<int> 
     x = rms_norm(g.ctx, x, m.w("te.output_norm.weight"), c.rms_eps);
     x = linear(g.ctx, m.w("te.proj.weight"), x);
 
-    g.compute(m.backend, x);
+    g.compute(m.te_cpu ? m.cpu : m.backend, x);
     return tensor_to_f32(x);
 }
 
