@@ -58,7 +58,8 @@ cmake --build build-cpu -j
 ### Vulkan or CUDA
 
 Vulkan stays the default. It is a little ahead at Q4_K and Q8_0, level at F16, and
-it needs no toolkit. Measured on an RTX 3060, per frame of audio (80 ms):
+it needs no toolkit. Measured on an RTX 3060 12 GB with its tensor core limit
+unlocked, per frame of audio (80 ms):
 
 | Model | `cfg_scale` | Backend | Backbone | Depth | Vocoder | Total per frame | Real time factor |
 | --- | --- | --- | --- | --- | --- | --- | --- |

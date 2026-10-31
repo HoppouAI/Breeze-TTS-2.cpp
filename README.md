@@ -27,6 +27,28 @@ clip was generated on one RTX 3060, faster than realtime, and nothing was cherry
 
 https://github.com/user-attachments/assets/b63e4664-497f-4bac-b9e2-50bf571df30a
 
+## Performance
+
+Recent versions borrow from [BreezeRT](https://breezeblue.ai/blog/breezert-ultra-low-latency-tts),
+the low latency runtime from the Breeze TTS 2 team: chunks that start small and grow, the depth
+decoder compiled into one graph per frame, and CUDA graph replay. On top of that, the vocoder now
+upsamples with a matmul, which is not from that post and turned out to be the biggest single win on
+CUDA. Its multi request scheduling and incremental vocoder decoding are not implemented here.
+
+Real time factor on one RTX 3060 12 GB, with its tensor core limit unlocked, so a stock card may
+land a little lower on CUDA:
+
+| Model | `cfg_scale` | Backend | v0.1.3 | v0.1.4 |
+| --- | --- | --- | --- | --- |
+| Q4_K | 1 | Vulkan | 1.89x | 2.29x |
+| Q4_K | 3 | Vulkan | 1.52x | 1.73x |
+| Q4_K | 1 | CUDA | 0.60x | 2.03x |
+| Q4_K | 3 | CUDA | 0.64x | 1.45x |
+
+Time to first audio on Vulkan, at Q8_0 with a Q4_K depth decoder, went from about 380 ms to about
+240 ms, or about 130 ms with `--chunk-first 1`. Vulkan stays the default, the reasons and the full
+per stage numbers are in [docs/build.md](docs/build.md).
+
 ## Documentation
 
 <div align="center">
