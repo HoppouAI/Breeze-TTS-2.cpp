@@ -1,4 +1,5 @@
 #include "ws_api.h"
+#include "json.h"
 
 #include "breeze/audio.h"
 #include "breeze/generation.h"
@@ -11,44 +12,14 @@
 
 namespace breeze {
 
-// the messages are small flat objects, so pulling one field out beats vendoring a json parser
-static std::string json_str(const std::string & msg, const char * key) {
-    const std::string pat = "\"" + std::string(key) + "\"";
-    size_t at = msg.find(pat);
-    if (at == std::string::npos) return "";
-    at = msg.find(':', at + pat.size());
-    if (at == std::string::npos) return "";
-    at = msg.find('"', at);
-    if (at == std::string::npos) return "";
-    std::string out;
-    for (size_t i = at + 1; i < msg.size(); i++) {
-        const char c = msg[i];
-        if (c == '\\' && i + 1 < msg.size()) {
-            const char n = msg[++i];
-            if (n == 'n') out += '\n';
-            else if (n == 't') out += '\t';
-            else if (n == 'r') out += '\r';
-            else if (n == 'u') { i += 4; }
-            else out += n;
-            continue;
-        }
-        if (c == '"') break;
-        out += c;
-    }
-    return out;
+static std::string json_str(const JVal & msg, const char * key) {
+    const auto it = msg.obj.find(key);
+    return it != msg.obj.end() && it->second.kind == JVal::Str ? it->second.str : "";
 }
 
-static double json_num(const std::string & msg, const char * key, double def) {
-    const std::string pat = "\"" + std::string(key) + "\"";
-    size_t at = msg.find(pat);
-    if (at == std::string::npos) return def;
-    at = msg.find(':', at + pat.size());
-    if (at == std::string::npos) return def;
-    try {
-        return std::stod(msg.substr(at + 1));
-    } catch (...) {
-        return def;
-    }
+static double json_num(const JVal & msg, const char * key, double def) {
+    const auto it = msg.obj.find(key);
+    return it != msg.obj.end() && it->second.kind == JVal::Num ? it->second.num : def;
 }
 
 static std::string esc(const std::string & s) {
@@ -179,7 +150,7 @@ static void speaker(WsConn & conn, Session & s, std::mutex & gpu) {
     }
 }
 
-static void handle_start(WsConn & conn, Session & s, const std::string & msg, BreezeModel & model,
+static void handle_start(WsConn & conn, Session & s, const JVal & msg, BreezeModel & model,
                          MimiCodec & codec, VoiceStore & store, int chunk_first, int chunk_max,
                          int split_chars) {
     GenRequest g;
@@ -218,10 +189,15 @@ void ws_connection(WsConn & conn, BreezeModel & model, MimiCodec & codec, VoiceS
     std::thread worker([&] { speaker(conn, s, gpu); });
     event(conn, "ready", "\"sample_rate\":24000,\"format\":\"s16le\"");
 
-    std::string msg;
+    std::string raw;
     bool binary = false;
-    while (conn.recv(msg, binary)) {
+    while (conn.recv(raw, binary)) {
         if (binary) continue;
+        JVal msg;
+        if (!JParser(raw).parse(msg) || msg.kind != JVal::Obj) {
+            event(conn, "error", "\"message\":\"messages have to be a json object\"");
+            continue;
+        }
         const std::string type = json_str(msg, "type");
 
         if (type == "start") {
