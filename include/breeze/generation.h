@@ -7,6 +7,9 @@
 
 #include <chrono>
 #include <functional>
+#include <map>
+#include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -29,8 +32,9 @@ struct GenRequest {
     float top_p = 0.0f;
     float repetition_penalty = 0.0f;
     int max_new_tokens = 0; // 0 uses the model default
-    // frames per streamed chunk, ramping from first to max. set both the same for a fixed size
-    int chunk_first = 4;
+    // frames per streamed chunk, ramping from first to max. set both the same for a fixed size.
+    // first is a floor, a busy gpu needs more audio up front to stay ahead of the listener
+    int chunk_first = 1;
     int chunk_max = 25;
     // the model loses track of the text past about a minute of audio, 0 keeps it in one pass
     int split_chars = 600;
@@ -42,7 +46,7 @@ struct GenRequest {
 struct PlayClock {
     bool started = false;
     std::chrono::steady_clock::time_point runs_out;
-    double frame_ms = 0; // backbone plus depth per frame
+    double frame_ms = 0; // wall time per frame, whatever else shared the gpu included
     double voc_ms = 0;   // vocoder per decoded frame
 };
 
@@ -86,16 +90,99 @@ struct GenTimings {
     int frames = 0, flushes = 0, first_frames = 0;
 };
 
+class GenScheduler;
+
+// a stream runs inline when no scheduler is passed
 void generate(BreezeModel & m, MimiCodec & codec, const GenRequest & req, const AudioCallback & cb,
-              GenTimings * timings = nullptr);
+              GenTimings * timings = nullptr, GenScheduler * sched = nullptr);
+
+// long enough that a normal request doesnt grow the graph allocator again
+const char * warm_up_text();
 
 // runs a throwaway generation so the first real request doesnt pay for pipeline setup
 void warm_up(BreezeModel & m, MimiCodec & codec, const GenRequest & base);
 
+// what a finished piece leaves behind so the next one can keep the same voice
+struct ChunkRef {
+    std::vector<int> codes;
+    int n_frames = 0;
+    std::string text;
+};
+
+// gpu objects worth keeping between pieces
+struct GenPool {
+    DepthRunner depth[2];
+    std::vector<std::unique_ptr<VocoderStream>> voc;
+    std::map<int, double> step_ms; // recent wall time of a frame, by how many rows shared it
+
+    DepthRunner & runner(BreezeModel & m, int branches);
+    std::unique_ptr<VocoderStream> take_voc(BreezeModel & m);
+    void free();
+};
+
+// one piece of text being generated, stepped from outside so several can share a batch
+struct SpeechJob {
+    SpeechJob(BreezeModel & m, GenPool & pool, const GenRequest & req, const std::string & text, ChunkRef ref,
+              uint32_t seed, AudioCallback cb, GenTimings & tm,
+              std::chrono::steady_clock::time_point t_start, PlayClock & clock);
+
+    // other_rows is what the gpu is already busy with, it decides how big the first chunk has to be
+    void start(int other_rows = 0);
+    bool wants_frame() const { return !stopped && !eos && step < max_new; }
+    void finish();
+    // gives the gpu objects back without flushing, for after an error
+    void abandon();
+
+    int branches() const { return use_cfg ? 2 : 1; }
+    void after_depth(const std::vector<int> & depth_codes);
+    void after_backbone(StepOut c, StepOut u);
+
+    BreezeModel & m;
+    GenPool & pool;
+    const GenRequest & req;
+    std::string text;
+    ChunkRef ref;
+    AudioCallback cb;
+    GenTimings & tm;
+    std::chrono::steady_clock::time_point t_start;
+    PlayClock & clock;
+    ChunkRef out;
+
+    std::mt19937 rng;
+    bool use_cfg = false;
+    bool stopped = false;
+    bool eos = false;
+    int step = 0;
+    int max_new = 0;
+    BackboneState st_c, st_u;
+    StepOut o_c, o_u;
+    SampleParams bp;
+    std::vector<int> suppress;
+    std::vector<int> hist;
+    int cb0 = 0;
+    std::vector<int> frame; // the one the backbone reads next
+    double voc_step_ms = 0; // this job's vocoder time in the current frame
+
+    std::vector<int> frames;
+    int emitted = 0;
+    int chunk = 1;
+    int chunk_max = 1;
+    double frame_audio_ms = 0;
+    std::unique_ptr<VocoderStream> voc;
+
+private:
+    bool flush(bool final_flush);
+    bool due_early(int pending) const;
+};
+
+// one frame for every job, in as few gpu passes as they can share
+void step_jobs(BreezeModel & m, GenPool & pool, const std::vector<SpeechJob *> & jobs);
+
 // text that arrives a bit at a time, the reference and play clock carry over between pieces
 class GenSession {
 public:
-    void begin(BreezeModel & m, MimiCodec & codec, const GenRequest & req, GenTimings * tm = nullptr);
+    void begin(BreezeModel & m, MimiCodec & codec, const GenRequest & req, GenTimings * tm = nullptr,
+               GenScheduler * sched = nullptr);
 
     // speaks one piece. false means the callback asked to stop
     bool speak(const std::string & text, const AudioCallback & cb, GenTimings * tm = nullptr);
@@ -115,6 +202,8 @@ private:
     uint32_t m_piece = 0;
     std::chrono::steady_clock::time_point m_start;
     PlayClock m_clock;
+    GenScheduler * m_sched = nullptr;
+    GenPool m_pool;
 };
 
 }

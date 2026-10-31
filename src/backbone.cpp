@@ -45,13 +45,13 @@ std::vector<float> audio_embed_forward(BreezeModel & m, const std::vector<int> &
     return tensor_to_f32(out);
 }
 
-static ggml_tensor * bb_layer(ggml_context * ctx, BreezeModel & m, Graph & g, BackboneState & st,
-                              ggml_tensor * x, int il, ggml_tensor * pos, ggml_tensor * mask, int n,
-                              BackboneState * other = nullptr, ggml_tensor * other_mask = nullptr) {
+static ggml_tensor * bb_layer(ggml_context * ctx, BreezeModel & m, Graph & g, const std::vector<BackboneState *> & states,
+                              ggml_tensor * x, int il, ggml_tensor * pos, const std::vector<ggml_tensor *> & masks, int n) {
     const BackboneConfig & c = m.cfg.bb;
     const std::string p = "bb.blk." + std::to_string(il);
     const float scale = 1.0f / std::sqrt((float) c.head_dim);
-    const bool f32_batch = other && std::string(m.backend.name()).find("Vulkan") == 0;
+    const bool batch = states.size() > 1;
+    const bool f32_batch = batch && std::string(m.backend.name()).find("Vulkan") == 0;
     auto project = [&](const char * suffix, ggml_tensor * input) {
         return bb_linear(ctx, m.w(p + suffix), input, f32_batch);
     };
@@ -67,17 +67,18 @@ static ggml_tensor * bb_layer(ggml_context * ctx, BreezeModel & m, Graph & g, Ba
     q = ggml_rope_ext(ctx, q, pos, nullptr, c.head_dim, GGML_ROPE_TYPE_NEOX, 0, c.rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
     k = ggml_rope_ext(ctx, k, pos, nullptr, c.head_dim, GGML_ROPE_TYPE_NEOX, 0, c.rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
 
-    auto attend = [&](BackboneState & branch, ggml_tensor * branch_mask, int index) {
+    auto attend = [&](size_t index) {
         auto slice = [&](ggml_tensor * t) {
-            return other ? ggml_view_3d(ctx, t, t->ne[0], t->ne[1], 1,
+            return batch ? ggml_view_3d(ctx, t, t->ne[0], t->ne[1], 1,
                                         t->nb[1], t->nb[2], index * t->nb[2]) : t;
         };
-        auto * kfull = cache_append(ctx, g, branch.kv.k[il], slice(k), branch.pos);
-        auto * vfull = cache_append(ctx, g, branch.kv.v[il], slice(v), branch.pos);
-        return attention(ctx, slice(q), kfull, vfull, branch_mask, scale, c.n_head, c.n_kv_head);
+        BackboneState & st = *states[index];
+        auto * kfull = cache_append(ctx, g, st.kv.k[il], slice(k), st.pos);
+        auto * vfull = cache_append(ctx, g, st.kv.v[il], slice(v), st.pos);
+        return attention(ctx, slice(q), kfull, vfull, masks[index], scale, c.n_head, c.n_kv_head);
     };
-    ggml_tensor * a = attend(st, mask, 0);
-    if (other) a = ggml_concat(ctx, a, attend(*other, other_mask, 1), 1);
+    ggml_tensor * a = attend(0);
+    for (size_t i = 1; i < states.size(); i++) a = ggml_concat(ctx, a, attend(i), 1);
     a = project(".attn_output.weight", a);
     x = ggml_add(ctx, res, a);
 
@@ -101,7 +102,9 @@ StepOut backbone_run(BreezeModel & m, BackboneState & st, const std::vector<floa
     std::vector<float> mask_v = build_causal_mask(n, total, st.pos, 0);
     ggml_tensor * mask = g.input_f32(mask_v, total, n);
 
-    for (int il = 0; il < c.n_layer; il++) x = bb_layer(g.ctx, m, g, st, x, il, pos, mask, n);
+    const std::vector<BackboneState *> states = { &st };
+    const std::vector<ggml_tensor *> masks = { mask };
+    for (int il = 0; il < c.n_layer; il++) x = bb_layer(g.ctx, m, g, states, x, il, pos, masks, n);
     x = rms_norm(g.ctx, x, m.w("bb.output_norm.weight"), c.rms_eps);
 
     ggml_tensor * last = ggml_view_2d(g.ctx, x, c.hidden, 1, x->nb[1], (size_t) (n - 1) * x->nb[1]);
@@ -119,35 +122,46 @@ StepOut backbone_run(BreezeModel & m, BackboneState & st, const std::vector<floa
     return out;
 }
 
-std::array<StepOut, 2> backbone_run_cfg(BreezeModel & m, BackboneState & cond, BackboneState & uncond,
-                                       const std::vector<float> & embed) {
+std::vector<StepOut> backbone_run_batch(BreezeModel & m, const std::vector<BackboneState *> & states,
+                                        const std::vector<float> & embeds) {
     const auto & c = m.cfg.bb;
-    Graph g(8192);
-    auto * input = g.input_f32(embed, c.hidden);
-    auto * x = ggml_concat(g.ctx, input, input, 1);
-    auto * pos = g.input_i32({cond.pos, uncond.pos}, 2);
-    auto * mask_c = g.input_f32(std::vector<float>(cond.pos + 1, 0.0f), cond.pos + 1);
-    auto * mask_u = g.input_f32(std::vector<float>(uncond.pos + 1, 0.0f), uncond.pos + 1);
+    const int rows = (int) states.size();
+    Graph g(8192 + 2048 * (size_t) rows);
+    auto * x = g.input_f32(embeds, c.hidden, rows);
+    std::vector<int32_t> pos_i(rows);
+    std::vector<ggml_tensor *> masks(rows);
+    for (int r = 0; r < rows; r++) {
+        pos_i[r] = states[r]->pos;
+        masks[r] = g.input_f32(std::vector<float>(states[r]->pos + 1, 0.0f), states[r]->pos + 1);
+    }
+    auto * pos = g.input_i32(pos_i, rows);
     for (int il = 0; il < c.n_layer; il++)
-        x = bb_layer(g.ctx, m, g, cond, x, il, pos, mask_c, 2, &uncond, mask_u);
+        x = bb_layer(g.ctx, m, g, states, x, il, pos, masks, rows);
     x = rms_norm(g.ctx, x, m.w("bb.output_norm.weight"), c.rms_eps);
     auto * logits = bb_linear(g.ctx, m.w("bb.lm_head.weight"), x,
-                             std::string(m.backend.name()).find("Vulkan") == 0);
+                             rows > 1 && std::string(m.backend.name()).find("Vulkan") == 0);
     ggml_set_output(x);
     g.write(x);
     g.compute(m.backend, logits);
 
     const auto hidden = tensor_to_f32(x);
     const auto scores = tensor_to_f32(logits);
-    const size_t vocab = scores.size() / 2;
-    std::array<StepOut, 2> out;
-    for (int b = 0; b < 2; b++) {
-        out[b].hidden.assign(hidden.begin() + b * c.hidden, hidden.begin() + (b + 1) * c.hidden);
-        out[b].logits.assign(scores.begin() + b * vocab, scores.begin() + (b + 1) * vocab);
+    const size_t vocab = scores.size() / rows;
+    std::vector<StepOut> out(rows);
+    for (int r = 0; r < rows; r++) {
+        out[r].hidden.assign(hidden.begin() + r * c.hidden, hidden.begin() + (r + 1) * c.hidden);
+        out[r].logits.assign(scores.begin() + r * vocab, scores.begin() + (r + 1) * vocab);
+        states[r]->pos++;
     }
-    cond.pos++;
-    uncond.pos++;
     return out;
+}
+
+std::array<StepOut, 2> backbone_run_cfg(BreezeModel & m, BackboneState & cond, BackboneState & uncond,
+                                       const std::vector<float> & embed) {
+    std::vector<float> both = embed;
+    both.insert(both.end(), embed.begin(), embed.end());
+    auto rows = backbone_run_batch(m, { &cond, &uncond }, both);
+    return { std::move(rows[0]), std::move(rows[1]) };
 }
 
 }

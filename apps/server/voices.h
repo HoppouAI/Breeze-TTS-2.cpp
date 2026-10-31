@@ -2,6 +2,7 @@
 
 #include "breeze/codec.h"
 #include "breeze/model.h"
+#include "breeze/scheduler.h"
 
 #include "httplib.h"
 
@@ -43,7 +44,7 @@ public:
     // in memory insert, unnamed entries get evicted oldest first when the table is full
     void put(const std::string & id, CachedVoice v);
 
-    void add_routes(httplib::Server & svr, BreezeModel & model, MimiCodec & codec, std::mutex & gpu,
+    void add_routes(httplib::Server & svr, BreezeModel & model, MimiCodec & codec, GenScheduler & sched,
                     const std::string & dir);
 
 private:

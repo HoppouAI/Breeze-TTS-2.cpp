@@ -8,6 +8,7 @@
 #include "breeze/audio.h"
 #include "breeze/generation.h"
 #include "breeze/model.h"
+#include "breeze/scheduler.h"
 
 #include "httplib.h"
 #include "breeze_webui_assets.h"
@@ -62,9 +63,17 @@ static std::string cors_origin(const std::string & allowed, const httplib::Reque
     return "";
 }
 
+// gives the slot back when the response is finished, the stream outlives the handler
+struct SlotHold {
+    GenScheduler & sched;
+    int n;
+    SlotHold(GenScheduler & s, int count) : sched(s), n(count) {}
+    ~SlotHold() { sched.release(n); }
+};
+
 // one generation with the console progress bar, emit gets each decoded chunk and false stops it
-static void run_generation(BreezeModel & model, MimiCodec & codec, const GenRequest & g, int sr, bool verbose,
-                           const AudioCallback & emit) {
+static void run_generation(BreezeModel & model, MimiCodec & codec, GenScheduler & sched, const GenRequest & g, int sr,
+                           bool verbose, const AudioCallback & emit) {
     GenTimings tm;
     const auto t0 = std::chrono::steady_clock::now();
     const auto elapsed = [&] {
@@ -81,12 +90,14 @@ static void run_generation(BreezeModel & model, MimiCodec & codec, const GenRequ
             const double rate = wall > 0 ? secs / wall : 0;
             const double frac = est > 0 ? secs / est : 0;
             const double eta = rate > 0 ? (est > secs ? (est - secs) / rate : 0) : 0;
+            // bars from several streams would just write over each other
+            if (sched.parallel() > 1) return true;
             printf("\r%3.0f%%|%s| %.1f/%.1fs [%s<%s, %.1f fps, %.2fx]  ",
                    (frac < 1 ? frac : 1) * 100, bar(frac, 24).c_str(), secs, est,
                    mmss(wall).c_str(), mmss(eta).c_str(), secs * 12.5 / wall, rate);
             fflush(stdout);
             return true;
-        }, &tm);
+        }, &tm, &sched);
     } catch (const std::exception & e) {
         fprintf(stderr, "\ngeneration error: %s\n", e.what());
     }
@@ -133,19 +144,30 @@ int run_server(const ServerOptions & opts) {
         }
     }
 
+    GenScheduler sched;
+    sched.start(model, opts.parallel);
+    if (opts.warmup) {
+        GenRequest base;
+        try {
+            sched.warm_up(base);
+        } catch (const std::exception & e) {
+            fprintf(stderr, "warm up failed: %s\n", e.what());
+        }
+    }
+    if (opts.parallel > 1) printf("up to %d streams at once\n", opts.parallel);
+
     httplib::Server svr;
-    auto mutex = std::make_shared<std::mutex>();
     const int sr = model.cfg.sample_rate;
 
     VoiceStore store;
     store.load_dir(opts.voices_dir, model.cfg.num_codebooks);
-    store.add_routes(svr, model, codec, *mutex, opts.voices_dir);
+    store.add_routes(svr, model, codec, sched, opts.voices_dir);
 
     WsServer ws;
     const int ws_port = opts.ws_port == 0 ? opts.port + 1 : opts.ws_port;
     if (ws_port > 0) {
         const bool up = ws.start(opts.host, ws_port, [&](WsConn & c) {
-            ws_connection(c, model, codec, store, *mutex, opts.chunk_first, opts.chunk_max, opts.split_chars);
+            ws_connection(c, model, codec, store, sched, opts.chunk_first, opts.chunk_max, opts.split_chars);
         });
         if (up) printf("websocket on ws://%s:%d\n", opts.host.c_str(), ws_port);
         else fprintf(stderr, "could not open the websocket port %d\n", ws_port);
@@ -158,8 +180,7 @@ int run_server(const ServerOptions & opts) {
     });
 
     // openai clients post json to the same path, the form fields keep the native behaviour
-    const auto speak_openai = [&](const httplib::Request & req, httplib::Response & res,
-                                  std::shared_ptr<std::unique_lock<std::mutex>> lock) {
+    const auto speak_openai = [&](const httplib::Request & req, httplib::Response & res) {
         OpenAiSpeech o;
         int status = 200;
         const std::string err = parse_openai_speech(req.body, store, opts.split_chars, o, status);
@@ -168,6 +189,13 @@ int run_server(const ServerOptions & opts) {
             res.set_content(openai_error(err), "application/json");
             return;
         }
+        const int cost = sched.cost(o.g.cfg_scale);
+        if (!sched.try_acquire(cost)) {
+            res.status = 409;
+            res.set_content(openai_error("busy, every generation slot is taken", "server_error"), "application/json");
+            return;
+        }
+        auto slot = std::make_shared<SlotHold>(sched, cost);
         o.g.chunk_first = opts.chunk_first;
         o.g.chunk_max = opts.chunk_max;
         std::string sent, ctype;
@@ -185,7 +213,7 @@ int run_server(const ServerOptions & opts) {
         fflush(stdout);
 
         res.set_chunked_content_provider(
-            ctype, [&model, &codec, g = o.g, sse = o.sse, enc, lock, sr, verbose = opts.verbose](
+            ctype, [&model, &codec, &sched, g = o.g, sse = o.sse, enc, slot, sr, verbose = opts.verbose](
                        size_t, httplib::DataSink & sink) {
                 std::string buf;
                 const auto flush = [&] {
@@ -197,7 +225,7 @@ int run_server(const ServerOptions & opts) {
                 enc->begin(buf);
                 if (flush()) {
                     bool alive = true;
-                    run_generation(model, codec, g, sr, verbose, [&](const float * s, int n) {
+                    run_generation(model, codec, sched, g, sr, verbose, [&](const float * s, int n) {
                         enc->write(s, n, buf);
                         return alive = flush();
                     });
@@ -214,20 +242,18 @@ int run_server(const ServerOptions & opts) {
             });
     };
 
-    svr.Post("/v1/audio/speech", [&, mutex](const httplib::Request & req, httplib::Response & res) {
-        const bool json = req.get_header_value("Content-Type").find("json") != std::string::npos;
-        auto lock = std::make_shared<std::unique_lock<std::mutex>>(*mutex, std::try_to_lock);
-        if (!*lock) {
+    svr.Post("/v1/audio/speech", [&](const httplib::Request & req, httplib::Response & res) {
+        if (req.get_header_value("Content-Type").find("json") != std::string::npos) {
+            speak_openai(req, res);
+            return;
+        }
+        const int cost = sched.cost((float) atof(field(req, "cfg_scale", "1.0").c_str()));
+        if (!sched.try_acquire(cost)) {
             res.status = 409;
-            res.set_content(json ? openai_error("busy, another generation is running", "server_error")
-                                 : "{\"error\":\"busy\"}",
-                            "application/json");
+            res.set_content("{\"error\":\"busy\"}", "application/json");
             return;
         }
-        if (json) {
-            speak_openai(req, res, lock);
-            return;
-        }
+        auto slot = std::make_shared<SlotHold>(sched, cost);
         GenRequest g;
         g.text = field(req, "text", "");
         g.instruction = field(req, "instruction", "Speak clearly and naturally.");
@@ -256,7 +282,7 @@ int run_server(const ServerOptions & opts) {
                         CachedVoice v;
                         v.text = g.ref_text;
                         const auto t0 = std::chrono::steady_clock::now();
-                        v.codes = codec.encode(pcm, v.frames);
+                        sched.exec([&] { v.codes = codec.encode(pcm, v.frames); });
                         v.encode_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
                         printf("ref %s: encoded %d frames in %.0f ms\n", key.c_str(), v.frames, v.encode_ms);
                         fflush(stdout);
@@ -302,8 +328,8 @@ int run_server(const ServerOptions & opts) {
 
         res.set_chunked_content_provider(
             "audio/pcm",
-            [&model, &codec, g, lock, sr, verbose = opts.verbose](size_t, httplib::DataSink & sink) {
-                run_generation(model, codec, g, sr, verbose, [&](const float * s, int n) {
+            [&model, &codec, &sched, g, slot, sr, verbose = opts.verbose](size_t, httplib::DataSink & sink) {
+                run_generation(model, codec, sched, g, sr, verbose, [&](const float * s, int n) {
                     const std::vector<uint8_t> pcm = to_pcm16(s, n);
                     return sink.write((const char *) pcm.data(), pcm.size());
                 });
@@ -312,13 +338,17 @@ int run_server(const ServerOptions & opts) {
             });
     });
 
-    svr.Post("/v1/audio/convert", [&, mutex](const httplib::Request & req, httplib::Response & res) {
-        std::unique_lock<std::mutex> lock(*mutex, std::try_to_lock);
-        if (!lock) {
+    svr.Post("/v1/audio/convert", [&](const httplib::Request & req, httplib::Response & res) {
+        // this one runs for a while and doesnt share a batch, so it needs the whole gpu
+        if (!sched.try_acquire(sched.parallel())) {
             res.status = 409;
             res.set_content("{\"error\":\"busy\"}", "application/json");
             return;
         }
+        struct AllSlots {
+            GenScheduler & s;
+            ~AllSlots() { s.release(s.parallel()); }
+        } all_slots{sched};
         std::vector<float> src, ref;
         const auto load = [&](const char * name, std::vector<float> & out) {
             if (!req.has_file(name)) return false;
@@ -356,8 +386,6 @@ int run_server(const ServerOptions & opts) {
                vframes > 0 ? "cached reference" : "uploaded reference");
         fflush(stdout);
         try {
-            int T = 0;
-            std::vector<int> codes = codec.encode(src, T);
             ConvertOptions copt;
             copt.src_text = field(req, "text", "");
             copt.temperature = (float) atof(field(req, "temperature", "0.3").c_str());
@@ -368,7 +396,12 @@ int run_server(const ServerOptions & opts) {
             copt.ref_codes = vcodes;
             copt.ref_frames = vframes;
             const auto t0 = std::chrono::steady_clock::now();
-            std::vector<float> audio = convert_voice(model, codec, codes, T, ref, ref_text, copt);
+            std::vector<float> audio;
+            sched.exec([&] {
+                int T = 0;
+                const std::vector<int> codes = codec.encode(src, T);
+                audio = convert_voice(model, codec, codes, T, ref, ref_text, copt);
+            });
             const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             const double secs = (double) audio.size() / sr;
             printf("     %.2f s in %.2f s, %.2fx rt\n", secs, wall, wall > 0 ? secs / wall : 0.0);
@@ -420,8 +453,10 @@ int run_server(const ServerOptions & opts) {
     printf("listening on http://%s:%d\n", opts.host.c_str(), opts.port);
     if (!svr.listen(opts.host, opts.port)) {
         fprintf(stderr, "failed to bind %s:%d\n", opts.host.c_str(), opts.port);
+        sched.stop();
         return 1;
     }
+    sched.stop();
     model.free();
     return 0;
 }

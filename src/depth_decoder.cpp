@@ -1,6 +1,7 @@
 #include "breeze/depth_decoder.h"
 #include "breeze/sampling.h"
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -56,7 +57,7 @@ void DepthRunner::init(BreezeModel & m, int n_branches) {
 
 void DepthRunner::free() {
     steps.clear();
-    fused.reset();
+    fused.clear();
     kv.free();
 }
 
@@ -130,9 +131,10 @@ static std::unique_ptr<DepthStep> build_depth_step(BreezeModel & m, DepthRunner 
     return step;
 }
 
-static std::unique_ptr<DepthFused> build_depth_fused(BreezeModel & m, DepthRunner & r, int top_k) {
+static std::unique_ptr<DepthFused> build_depth_fused(BreezeModel & m, DepthRunner & r, int streams, int top_k) {
     const DepthConfig & c = m.cfg.dd;
     const int nb = r.n_branch;
+    const int rows = streams * nb;
     const int nc = m.cfg.num_codebooks;
     const int vs = m.cfg.audio_vocab_size;
     const int hs = m.cfg.hidden_size;
@@ -143,11 +145,11 @@ static std::unique_ptr<DepthFused> build_depth_fused(BreezeModel & m, DepthRunne
     ggml_tensor * embd = m.w("audio_embd.weight");
     ggml_tensor * head = m.w("dd.codebooks_head.weight");
 
-    f->cb0 = g.input_i32(std::vector<int32_t>(nb), nb);
-    f->hidden = g.input_f32(std::vector<float>((size_t) nb * hs), hs, nb);
-    f->noise = g.input_f32(std::vector<float>((size_t) top_k * (nc - 1)), top_k, nc - 1);
-    if (nb > 1) f->cfg = g.input_f32({ 1.0f }, 1);
-    f->inv_temp = g.input_f32({ 1.0f }, 1);
+    f->cb0 = g.input_i32(std::vector<int32_t>(rows), rows);
+    f->hidden = g.input_f32(std::vector<float>((size_t) rows * hs), hs, rows);
+    f->noise = g.input_f32(std::vector<float>((size_t) top_k * (nc - 1) * streams), top_k, (nc - 1) * streams);
+    if (nb > 1) f->cfg = g.input_f32(std::vector<float>(streams, 1.0f), streams);
+    f->inv_temp = g.input_f32(std::vector<float>(streams, 1.0f), streams);
     ggml_tensor * ff = g.input_f32(r.freq_factors, (int) r.freq_factors.size());
 
     // the cache only lives inside this graph, so it just grows by concat
@@ -159,55 +161,76 @@ static std::unique_ptr<DepthFused> build_depth_fused(BreezeModel & m, DepthRunne
         vf = vc[il];
     };
 
-    ggml_tensor * code = nullptr;
+    ggml_tensor * code_rows = nullptr;
     ggml_tensor * codes = nullptr;
     for (int h = 0; h < nc - 1; h++) {
         const int start = h == 0 ? 0 : h + 1;
         const int n_pos = h == 0 ? 2 : 1;
-        const int n_tok = n_pos * nb;
-        const int total = (start + n_pos) * nb;
+        const int n_tok = n_pos * rows;
+        const int total = (start + n_pos) * rows;
 
         ggml_tensor * embed;
         if (h == 0) {
             embed = ggml_concat(ctx, f->hidden, ggml_get_rows(ctx, embd, f->cb0), 1);
         } else {
             ggml_tensor * table = ggml_view_2d(ctx, embd, embd->ne[0], vs, embd->nb[1], (size_t) h * vs * embd->nb[1]);
-            embed = ggml_get_rows(ctx, table, code);
-            if (nb > 1) embed = ggml_repeat(ctx, embed, f->hidden);
+            embed = ggml_get_rows(ctx, table, code_rows);
         }
         ggml_tensor * x = linear(ctx, m.w("dd.in_proj.weight"), embed);
 
         std::vector<int32_t> pos_i(n_tok);
-        for (int i = 0; i < n_tok; i++) pos_i[i] = start + i / nb;
+        for (int i = 0; i < n_tok; i++) pos_i[i] = start + i / rows;
         ggml_tensor * pos = g.input_i32(pos_i, n_tok);
-        ggml_tensor * mask = g.input_f32(build_branch_causal_mask(n_tok, total, start, nb), total, n_tok);
+        ggml_tensor * mask = g.input_f32(build_branch_causal_mask(n_tok, total, start, rows), total, n_tok);
 
         for (int il = 0; il < c.n_layer; il++)
             x = dd_layer(ctx, m, x, il, pos, ff, mask, n_tok, kv);
         x = rms_norm(ctx, x, m.w("dd.output_norm.weight"), c.rms_eps);
 
-        ggml_tensor * last = ggml_cont(ctx, ggml_view_2d(ctx, x, c.hidden, nb, x->nb[1], (size_t) (n_tok - nb) * x->nb[1]));
+        ggml_tensor * last = ggml_cont(ctx, ggml_view_2d(ctx, x, c.hidden, rows, x->nb[1], (size_t) (n_tok - rows) * x->nb[1]));
         ggml_tensor * hw = ggml_view_2d(ctx, head, head->ne[0], head->ne[1], head->nb[1], (size_t) h * head->nb[2]);
         ggml_tensor * logits = ggml_mul_mat(ctx, hw, last);
-        if (nb > 1) {
-            ggml_tensor * cond = ggml_view_1d(ctx, logits, vs, 0);
-            ggml_tensor * unc = ggml_view_1d(ctx, logits, vs, logits->nb[1]);
-            logits = ggml_add(ctx, unc, ggml_mul(ctx, ggml_sub(ctx, cond, unc), f->cfg));
-        }
-        logits = ggml_reshape_2d(ctx, ggml_mul(ctx, logits, f->inv_temp), vs, 1);
 
-        // gumbel max over the top k is the same draw as softmax sampling over them
-        ggml_tensor * top = ggml_top_k(ctx, logits, top_k);
-        ggml_tensor * vals = ggml_get_rows(ctx, ggml_reshape_2d(ctx, logits, 1, vs), top);
-        ggml_tensor * noisy = ggml_add(ctx, ggml_reshape_1d(ctx, vals, top_k),
-                                       ggml_view_1d(ctx, f->noise, top_k, (size_t) h * top_k * sizeof(float)));
-        ggml_tensor * pick = ggml_argmax(ctx, ggml_reshape_2d(ctx, noisy, top_k, 1));
-        code = ggml_get_rows(ctx, ggml_reshape_2d(ctx, top, 1, top_k), pick);
-        codes = codes ? ggml_concat(ctx, codes, code, 0) : code;
+        code_rows = nullptr;
+        for (int s = 0; s < streams; s++) {
+            ggml_tensor * l = ggml_view_1d(ctx, logits, vs, (size_t) (s * nb) * logits->nb[1]);
+            if (nb > 1) {
+                ggml_tensor * unc = ggml_view_1d(ctx, logits, vs, (size_t) (s * nb + 1) * logits->nb[1]);
+                ggml_tensor * scale_s = ggml_view_1d(ctx, f->cfg, 1, (size_t) s * sizeof(float));
+                l = ggml_add(ctx, unc, ggml_mul(ctx, ggml_sub(ctx, l, unc), scale_s));
+            }
+            ggml_tensor * temp_s = ggml_view_1d(ctx, f->inv_temp, 1, (size_t) s * sizeof(float));
+            l = ggml_reshape_2d(ctx, ggml_cont(ctx, ggml_mul(ctx, l, temp_s)), vs, 1);
+
+            // gumbel max over the top k is the same draw as softmax sampling over them
+            ggml_tensor * top = ggml_top_k(ctx, l, top_k);
+            ggml_tensor * vals = ggml_get_rows(ctx, ggml_reshape_2d(ctx, l, 1, vs), top);
+            ggml_tensor * noisy = ggml_add(ctx, ggml_reshape_1d(ctx, vals, top_k),
+                                           ggml_view_1d(ctx, f->noise, top_k, (size_t) (h * streams + s) * top_k * sizeof(float)));
+            ggml_tensor * pick = ggml_argmax(ctx, ggml_reshape_2d(ctx, noisy, top_k, 1));
+            ggml_tensor * code = ggml_get_rows(ctx, ggml_reshape_2d(ctx, top, 1, top_k), pick);
+            codes = codes ? ggml_concat(ctx, codes, code, 0) : code;
+            for (int b = 0; b < nb; b++)
+                code_rows = code_rows ? ggml_concat(ctx, code_rows, code, 0) : code;
+        }
     }
     f->codes = codes;
     g.prepare(m.backend, codes);
     return f;
+}
+
+SampleParams DepthRunner::default_params(const BreezeModel & m) {
+    SampleParams sp;
+    sp.temperature = m.cfg.depth_temperature;
+    sp.top_k = m.cfg.depth_top_k;
+    sp.top_p = m.cfg.depth_top_p;
+    return sp;
+}
+
+bool DepthRunner::can_fuse(const BreezeModel & m, const SampleParams & sp) {
+    const int vs = m.cfg.audio_vocab_size;
+    const int k = sp.top_k > 0 && sp.top_k < vs ? sp.top_k : vs;
+    return sp.top_p >= 1.0f && k <= 256;
 }
 
 std::vector<int> DepthRunner::run(BreezeModel & m, const std::vector<std::vector<float>> & hiddens,
@@ -217,16 +240,18 @@ std::vector<int> DepthRunner::run(BreezeModel & m, const std::vector<std::vector
     const int vs = m.cfg.audio_vocab_size;
     kv.reset();
 
-    SampleParams sp;
-    sp.temperature = m.cfg.depth_temperature;
-    sp.top_k = m.cfg.depth_top_k;
-    sp.top_p = m.cfg.depth_top_p;
+    SampleParams sp = default_params(m);
     if (sp_in) sp = *sp_in;
 
     const int k = sp.top_k > 0 && sp.top_k < vs ? sp.top_k : vs;
-    if (!force && sp.top_p >= 1.0f && k <= 256) {
-        if (!fused || fused->top_k != k) fused = build_depth_fused(m, *this, k);
-        return run_fused(m, hiddens, cb0, cfg_scale, rng, sp);
+    if (!force && can_fuse(m, sp)) {
+        DepthItem item;
+        for (int b = 0; b < n_branch; b++) item.hidden[b] = &hiddens[b];
+        item.cb0 = cb0;
+        item.cfg_scale = cfg_scale;
+        item.temperature = sp.temperature;
+        item.rng = &rng;
+        return std::move(run_batch(m, { item }, k)[0]);
     }
 
     std::vector<int32_t> idx(n_branch);
@@ -258,31 +283,49 @@ std::vector<int> DepthRunner::run(BreezeModel & m, const std::vector<std::vector
     return std::vector<int>(codes.begin() + 1, codes.end());
 }
 
-std::vector<int> DepthRunner::run_fused(BreezeModel & m, const std::vector<std::vector<float>> & hiddens,
-                                        int cb0, float cfg_scale, std::mt19937 & rng, const SampleParams & sp) {
+std::vector<std::vector<int>> DepthRunner::run_batch(BreezeModel & m, const std::vector<DepthItem> & items, int top_k) {
     const int nc = m.cfg.num_codebooks;
     const int hs = m.cfg.hidden_size;
-    DepthFused & f = *fused;
+    const int streams = (int) items.size();
+    const int rows = streams * n_branch;
+    auto & slot = fused[{ streams, top_k }];
+    if (!slot) slot = build_depth_fused(m, *this, streams, top_k);
+    DepthFused & f = *slot;
 
-    std::vector<int32_t> idx(n_branch, cb0);
-    ggml_backend_tensor_set(f.cb0, idx.data(), 0, idx.size() * sizeof(int32_t));
-    for (int b = 0; b < n_branch; b++)
-        ggml_backend_tensor_set(f.hidden, hiddens[b].data(), (size_t) b * hs * sizeof(float), (size_t) hs * sizeof(float));
-
-    std::vector<float> noise((size_t) f.top_k * (nc - 1));
-    for (float & g : noise) {
-        const double u = ((double) rng() + 0.5) / 4294967296.0;
-        g = (float) -std::log(-std::log(u));
+    std::vector<int32_t> idx(rows);
+    std::vector<float> hidden((size_t) rows * hs);
+    std::vector<float> noise((size_t) top_k * (nc - 1) * streams);
+    std::vector<float> cfg(streams), inv(streams);
+    for (int s = 0; s < streams; s++) {
+        const DepthItem & it = items[s];
+        for (int b = 0; b < n_branch; b++) {
+            idx[s * n_branch + b] = it.cb0;
+            std::copy(it.hidden[b]->begin(), it.hidden[b]->end(), hidden.begin() + (size_t) (s * n_branch + b) * hs);
+        }
+        cfg[s] = it.cfg_scale;
+        inv[s] = 1.0f / (it.temperature > 0 ? it.temperature : 1.0f);
+        // laid out per codebook then per stream, but each stream draws from its own rng in codebook order
+        for (int h = 0; h < nc - 1; h++) {
+            float * row = noise.data() + (size_t) (h * streams + s) * top_k;
+            for (int i = 0; i < top_k; i++) {
+                const double u = ((double) (*it.rng)() + 0.5) / 4294967296.0;
+                row[i] = (float) -std::log(-std::log(u));
+            }
+        }
     }
+    ggml_backend_tensor_set(f.cb0, idx.data(), 0, idx.size() * sizeof(int32_t));
+    ggml_backend_tensor_set(f.hidden, hidden.data(), 0, hidden.size() * sizeof(float));
     ggml_backend_tensor_set(f.noise, noise.data(), 0, noise.size() * sizeof(float));
-    const float inv = 1.0f / (sp.temperature > 0 ? sp.temperature : 1.0f);
-    if (n_branch > 1) ggml_backend_tensor_set(f.cfg, &cfg_scale, 0, sizeof(float));
-    ggml_backend_tensor_set(f.inv_temp, &inv, 0, sizeof(float));
+    if (n_branch > 1) ggml_backend_tensor_set(f.cfg, cfg.data(), 0, cfg.size() * sizeof(float));
+    ggml_backend_tensor_set(f.inv_temp, inv.data(), 0, inv.size() * sizeof(float));
 
     f.graph.replay(m.backend);
-    std::vector<int32_t> out(nc - 1);
+    std::vector<int32_t> out((size_t) (nc - 1) * streams);
     ggml_backend_tensor_get(f.codes, out.data(), 0, out.size() * sizeof(int32_t));
-    return std::vector<int>(out.begin(), out.end());
+    std::vector<std::vector<int>> codes(streams, std::vector<int>(nc - 1));
+    for (int h = 0; h < nc - 1; h++)
+        for (int s = 0; s < streams; s++) codes[s][h] = out[(size_t) h * streams + s];
+    return codes;
 }
 
 }

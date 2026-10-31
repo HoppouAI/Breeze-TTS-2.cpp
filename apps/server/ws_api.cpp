@@ -3,6 +3,7 @@
 
 #include "breeze/audio.h"
 #include "breeze/generation.h"
+#include "breeze/scheduler.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -89,6 +90,7 @@ struct Session {
     std::string buffer;
     std::string instruction = "Speak clearly and naturally.";
     int budget = 600;
+    int cost = 1;
     bool started = false;
     bool ending = false;
     bool quit = false;
@@ -102,8 +104,8 @@ static void event(WsConn & c, const std::string & type, const std::string & extr
     c.send_text("{\"type\":\"" + type + "\"" + (extra.empty() ? "" : "," + extra) + "}");
 }
 
-// drains the queue one piece at a time, taking the gpu lock for each so other connections interleave
-static void speaker(WsConn & conn, Session & s, std::mutex & gpu) {
+// drains the queue one piece at a time, taking a slot for each so other connections interleave
+static void speaker(WsConn & conn, Session & s, GenScheduler & sched) {
     for (;;) {
         Piece piece;
         {
@@ -124,12 +126,11 @@ static void speaker(WsConn & conn, Session & s, std::mutex & gpu) {
         }
         if (s.cancel) { s.cancel = false; continue; }
 
-        std::unique_lock<std::mutex> hold(gpu, std::try_to_lock);
-        if (!hold) {
+        if (!sched.try_acquire(s.cost)) {
             event(conn, "queued");
-            hold.lock();
+            sched.acquire(s.cost);
         }
-        if (s.cancel) { s.cancel = false; continue; }
+        if (s.cancel) { sched.release(s.cost); s.cancel = false; continue; }
 
         {
             std::lock_guard<std::mutex> lock(s.mu);
@@ -144,7 +145,7 @@ static void speaker(WsConn & conn, Session & s, std::mutex & gpu) {
             sent += n;
             return conn.send_binary(pcm.data(), pcm.size());
         });
-        hold.unlock();
+        sched.release(s.cost);
 
         if (s.cancel) { event(conn, "cancelled"); s.cancel = false; continue; }
         if (!ok && !conn.alive()) return;
@@ -158,8 +159,8 @@ static void speaker(WsConn & conn, Session & s, std::mutex & gpu) {
 }
 
 static void handle_start(WsConn & conn, Session & s, const JVal & msg, BreezeModel & model,
-                         MimiCodec & codec, VoiceStore & store, int chunk_first, int chunk_max,
-                         int split_chars) {
+                         MimiCodec & codec, VoiceStore & store, GenScheduler & sched, int chunk_first,
+                         int chunk_max, int split_chars) {
     GenRequest g;
     g.instruction = json_str(msg, "instruction");
     if (g.instruction.empty()) g.instruction = "Speak clearly and naturally.";
@@ -179,10 +180,11 @@ static void handle_start(WsConn & conn, Session & s, const JVal & msg, BreezeMod
 
     std::lock_guard<std::mutex> lock(s.mu);
     s.instruction = g.instruction;
+    s.cost = sched.cost(g.cfg_scale);
     s.budget = (int) json_num(msg, "split_chars", split_chars);
     // streaming drains sentence by sentence, so it always needs a real budget to aim at
     if (s.budget <= 0) s.budget = 600;
-    s.gen.begin(model, codec, g);
+    s.gen.begin(model, codec, g, nullptr, &sched);
     s.started = true;
     s.queue.clear();
     s.buffer.clear();
@@ -191,9 +193,9 @@ static void handle_start(WsConn & conn, Session & s, const JVal & msg, BreezeMod
 }
 
 void ws_connection(WsConn & conn, BreezeModel & model, MimiCodec & codec, VoiceStore & store,
-                   std::mutex & gpu, int chunk_first, int chunk_max, int split_chars) {
+                   GenScheduler & sched, int chunk_first, int chunk_max, int split_chars) {
     Session s;
-    std::thread worker([&] { speaker(conn, s, gpu); });
+    std::thread worker([&] { speaker(conn, s, sched); });
     event(conn, "ready", "\"sample_rate\":24000,\"format\":\"s16le\"");
 
     std::string raw;
@@ -208,7 +210,7 @@ void ws_connection(WsConn & conn, BreezeModel & model, MimiCodec & codec, VoiceS
         const std::string type = json_str(msg, "type");
 
         if (type == "start") {
-            handle_start(conn, s, msg, model, codec, store, chunk_first, chunk_max, split_chars);
+            handle_start(conn, s, msg, model, codec, store, sched, chunk_first, chunk_max, split_chars);
             continue;
         }
         if (!s.started) {

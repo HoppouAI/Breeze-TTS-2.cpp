@@ -166,7 +166,7 @@ void VoiceStore::put(const std::string & id, CachedVoice v) {
 }
 
 void VoiceStore::add_routes(httplib::Server & svr, BreezeModel & model, MimiCodec & codec,
-                            std::mutex & gpu, const std::string & dir) {
+                            GenScheduler & sched, const std::string & dir) {
     const int sr = model.cfg.sample_rate;
     const int spf = model.cfg.samples_per_frame;
     const int ncb = model.cfg.num_codebooks;
@@ -224,12 +224,12 @@ void VoiceStore::add_routes(httplib::Server & svr, BreezeModel & model, MimiCode
         if (pcm.empty()) return fail(res, 400, "could not read ref_audio");
 
         // encoding runs on the same device generation does, so it waits its turn
-        std::unique_lock<std::mutex> lock(gpu, std::try_to_lock);
-        if (!lock) return fail(res, 409, "busy");
+        if (!sched.try_acquire()) return fail(res, 409, "busy");
 
         v.text = text;
         const auto t0 = std::chrono::steady_clock::now();
-        v.codes = codec.encode(pcm, v.frames);
+        sched.exec([&] { v.codes = codec.encode(pcm, v.frames); });
+        sched.release();
         v.encode_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 
         if (!name.empty()) {

@@ -51,6 +51,7 @@ set(BREEZE_SOURCES
     src/codec_transformer.cpp
     src/sampling.cpp
     src/generation.cpp
+    src/scheduler.cpp
     src/text_split.cpp
     src/voice.cpp
     src/model.cpp

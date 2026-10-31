@@ -188,7 +188,7 @@ static void test_fused(BreezeModel & m) {
                 sp.top_k = k;
                 std::mt19937 rng(frame);
                 const auto codes = fused.run(m, hidden, cb0, 3.0f, rng, &sp);
-                require(fused.fused && fused.steps[0] == nullptr, "fused path was not taken");
+                require(!fused.fused.empty() && fused.steps[0] == nullptr, "fused path was not taken");
                 stepped.run(m, hidden, cb0, 3.0f, rng, &sp, codes.data(), nc - 1);
                 for (int j = 0; j < nc - 1; j++) {
                     const auto out = tensor_to_f32(stepped.steps[j]->logits);
@@ -202,6 +202,79 @@ static void test_fused(BreezeModel & m) {
             }
         }
     }
+}
+
+// a stream has to come out the same whoever else shares its batch
+static void test_batched_depth(BreezeModel & m) {
+    const int vs = m.cfg.audio_vocab_size;
+    std::mt19937 inputs(11);
+    int checked = 0, same = 0;
+    for (int nb : {1, 2}) {
+        DepthRunner solo, batched;
+        solo.init(m, nb);
+        batched.init(m, nb);
+        for (int streams : {2, 3}) {
+            std::vector<std::vector<std::vector<float>>> hidden(streams);
+            std::vector<DepthItem> items(streams);
+            std::vector<std::mt19937> a, b;
+            for (int s = 0; s < streams; s++) {
+                hidden[s].assign(nb, std::vector<float>(m.cfg.hidden_size));
+                for (auto & branch : hidden[s])
+                    for (auto & x : branch) x = (static_cast<int>(inputs() % 201) - 100) * 0.01f;
+                a.emplace_back(100 + s);
+                b.emplace_back(100 + s);
+            }
+            for (int s = 0; s < streams; s++) {
+                for (int branch = 0; branch < nb; branch++) items[s].hidden[branch] = &hidden[s][branch];
+                items[s].cb0 = inputs() % vs;
+                items[s].cfg_scale = 2.0f + s;
+                items[s].temperature = 1.0f;
+            }
+            for (int k : {1, 4}) {
+                for (int s = 0; s < streams; s++) items[s].rng = &a[s];
+                const auto together = batched.run_batch(m, items, k);
+                for (int s = 0; s < streams; s++) {
+                    items[s].rng = &b[s];
+                    const auto alone = solo.run_batch(m, { items[s] }, k);
+                    checked++;
+                    if (together[s] == alone[0]) same++;
+                }
+            }
+        }
+    }
+    // gpu rounding can tip a near tie on logits this small, the cpu has no such excuse
+    require(same == checked || (m.backend.is_gpu && same * 3 >= checked * 2),
+            std::to_string(checked - same) + " of " + std::to_string(checked) + " streams came out different in a batch");
+}
+
+static void test_batched_backbone(BreezeModel & m) {
+    std::mt19937 rng(321);
+    auto embeds = [&](int n) {
+        std::vector<float> values(n * m.cfg.hidden_size);
+        for (auto & x : values) x = (static_cast<int>(rng() % 201) - 100) * 0.01f;
+        return values;
+    };
+    const int lengths[3] = {3, 7, 5};
+    BackboneState batched[3], separate[3];
+    for (int r = 0; r < 3; r++) {
+        batched[r].init(m, 32);
+        separate[r].init(m, 32);
+        const auto prompt = embeds(lengths[r]);
+        backbone_run(m, batched[r], prompt, lengths[r]);
+        backbone_run(m, separate[r], prompt, lengths[r]);
+    }
+    for (int step = 0; step < 4; step++) {
+        const auto input = embeds(3);
+        const auto actual = backbone_run_batch(m, { &batched[0], &batched[1], &batched[2] }, input);
+        for (int r = 0; r < 3; r++) {
+            const std::vector<float> one(input.begin() + r * m.cfg.hidden_size, input.begin() + (r + 1) * m.cfg.hidden_size);
+            const auto expected = backbone_run(m, separate[r], one, 1);
+            close(actual[r].hidden, expected.hidden);
+            close(actual[r].logits, expected.logits);
+            require(batched[r].pos == separate[r].pos, "batched position differs");
+        }
+    }
+    for (int r = 0; r < 3; r++) { batched[r].free(); separate[r].free(); }
 }
 
 static void test_backbone(BreezeModel & m) {
@@ -280,6 +353,8 @@ int main(int argc, char ** argv) {
             test_graph(fixture.model.backend);
             test_depth(fixture.model);
             test_fused(fixture.model);
+            test_batched_depth(fixture.model);
+            test_batched_backbone(fixture.model);
             test_backbone(fixture.model);
             test_swiglu(fixture.model);
         }

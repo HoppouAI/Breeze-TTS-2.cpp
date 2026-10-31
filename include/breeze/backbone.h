@@ -30,6 +30,10 @@ std::vector<float> audio_embed_forward(BreezeModel & m, const std::vector<int> &
 // run a chunk of inputs_embeds through the backbone, appending to the kv cache
 StepOut backbone_run(BreezeModel & m, BackboneState & st, const std::vector<float> & embeds, int n_tokens);
 
+// one row per state, each with its own cache and position, embeds is [hidden, rows]
+std::vector<StepOut> backbone_run_batch(BreezeModel & m, const std::vector<BackboneState *> & states,
+                                        const std::vector<float> & embeds);
+
 // one audio frame shared by two CFG branches, each with its own cache and position
 std::array<StepOut, 2> backbone_run_cfg(BreezeModel & m, BackboneState & cond, BackboneState & uncond,
                                        const std::vector<float> & embed);
