@@ -6,7 +6,7 @@
 #include <map>
 #include <memory>
 #include <random>
-#include <utility>
+#include <tuple>
 #include <vector>
 
 namespace breeze {
@@ -30,7 +30,7 @@ struct DepthFused {
     int top_k = 0;
 };
 
-// one stream's share of a batched frame, branches of a cfg stream are cond then uncond
+// one stream's share of a batched frame, hidden[1] is the uncond branch when it uses cfg
 struct DepthItem {
     const std::vector<float> * hidden[2] = { nullptr, nullptr };
     int cb0 = 0;
@@ -45,7 +45,7 @@ struct DepthRunner {
     int n_branch = 1;
     std::vector<float> freq_factors;
     std::vector<std::unique_ptr<DepthStep>> steps;
-    std::map<std::pair<int, int>, std::unique_ptr<DepthFused>> fused; // by streams and top k
+    std::map<std::tuple<int, int, int>, std::unique_ptr<DepthFused>> fused; // plain streams, cfg streams, top k
 
     ~DepthRunner() { free(); }
     void init(BreezeModel & m, int n_branches);
@@ -57,7 +57,7 @@ struct DepthRunner {
                          const SampleParams * sp = nullptr,
                          const int * force = nullptr, int n_force = 0);
 
-    // the fused graph over several streams at once, top_k has to be one the fused graph can take
+    // the fused graph over several streams at once, plain and cfg can share it
     std::vector<std::vector<int>> run_batch(BreezeModel & m, const std::vector<DepthItem> & items, int top_k);
 
     static SampleParams default_params(const BreezeModel & m);

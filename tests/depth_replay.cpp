@@ -242,6 +242,40 @@ static void test_batched_depth(BreezeModel & m) {
             }
         }
     }
+    // plain and cfg streams in one graph, each coming out the same as on its own
+    {
+        DepthRunner solo, mixed;
+        solo.init(m, 1);
+        mixed.init(m, 1);
+        std::vector<std::vector<float>> hidden(5, std::vector<float>(m.cfg.hidden_size));
+        for (auto & h : hidden)
+            for (auto & x : h) x = (static_cast<int>(inputs() % 201) - 100) * 0.01f;
+        // deliberately out of order, the batch has to hand results back the way they came in
+        std::vector<DepthItem> items(3);
+        items[0].hidden[0] = &hidden[0];
+        items[0].hidden[1] = &hidden[1];
+        items[0].cfg_scale = 3.0f;
+        items[1].hidden[0] = &hidden[2];
+        items[2].hidden[0] = &hidden[3];
+        items[2].hidden[1] = &hidden[4];
+        items[2].cfg_scale = 2.0f;
+        for (int s = 0; s < 3; s++) {
+            items[s].cb0 = inputs() % vs;
+            items[s].temperature = 1.0f;
+        }
+        std::vector<std::mt19937> a, b;
+        for (int s = 0; s < 3; s++) {
+            a.emplace_back(200 + s);
+            b.emplace_back(200 + s);
+        }
+        for (int s = 0; s < 3; s++) items[s].rng = &a[s];
+        const auto together = mixed.run_batch(m, items, 4);
+        for (int s = 0; s < 3; s++) {
+            items[s].rng = &b[s];
+            checked++;
+            if (together[s] == solo.run_batch(m, { items[s] }, 4)[0]) same++;
+        }
+    }
     // gpu rounding can tip a near tie on logits this small, the cpu has no such excuse
     require(same == checked || (m.backend.is_gpu && same * 3 >= checked * 2),
             std::to_string(checked - same) + " of " + std::to_string(checked) + " streams came out different in a batch");

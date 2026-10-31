@@ -131,10 +131,11 @@ static std::unique_ptr<DepthStep> build_depth_step(BreezeModel & m, DepthRunner 
     return step;
 }
 
-static std::unique_ptr<DepthFused> build_depth_fused(BreezeModel & m, DepthRunner & r, int streams, int top_k) {
+// plain streams take the first rows, then each cfg stream takes a cond and an uncond row
+static std::unique_ptr<DepthFused> build_depth_fused(BreezeModel & m, DepthRunner & r, int n_plain, int n_cfg, int top_k) {
     const DepthConfig & c = m.cfg.dd;
-    const int nb = r.n_branch;
-    const int rows = streams * nb;
+    const int streams = n_plain + n_cfg;
+    const int rows = n_plain + 2 * n_cfg;
     const int nc = m.cfg.num_codebooks;
     const int vs = m.cfg.audio_vocab_size;
     const int hs = m.cfg.hidden_size;
@@ -148,7 +149,7 @@ static std::unique_ptr<DepthFused> build_depth_fused(BreezeModel & m, DepthRunne
     f->cb0 = g.input_i32(std::vector<int32_t>(rows), rows);
     f->hidden = g.input_f32(std::vector<float>((size_t) rows * hs), hs, rows);
     f->noise = g.input_f32(std::vector<float>((size_t) top_k * (nc - 1) * streams), top_k, (nc - 1) * streams);
-    if (nb > 1) f->cfg = g.input_f32(std::vector<float>(streams, 1.0f), streams);
+    if (n_cfg > 0) f->cfg = g.input_f32(std::vector<float>(streams, 1.0f), streams);
     f->inv_temp = g.input_f32(std::vector<float>(streams, 1.0f), streams);
     ggml_tensor * ff = g.input_f32(r.freq_factors, (int) r.freq_factors.size());
 
@@ -193,9 +194,11 @@ static std::unique_ptr<DepthFused> build_depth_fused(BreezeModel & m, DepthRunne
 
         code_rows = nullptr;
         for (int s = 0; s < streams; s++) {
-            ggml_tensor * l = ggml_view_1d(ctx, logits, vs, (size_t) (s * nb) * logits->nb[1]);
-            if (nb > 1) {
-                ggml_tensor * unc = ggml_view_1d(ctx, logits, vs, (size_t) (s * nb + 1) * logits->nb[1]);
+            const bool guided = s >= n_plain;
+            const int row = guided ? n_plain + 2 * (s - n_plain) : s;
+            ggml_tensor * l = ggml_view_1d(ctx, logits, vs, (size_t) row * logits->nb[1]);
+            if (guided) {
+                ggml_tensor * unc = ggml_view_1d(ctx, logits, vs, (size_t) (row + 1) * logits->nb[1]);
                 ggml_tensor * scale_s = ggml_view_1d(ctx, f->cfg, 1, (size_t) s * sizeof(float));
                 l = ggml_add(ctx, unc, ggml_mul(ctx, ggml_sub(ctx, l, unc), scale_s));
             }
@@ -210,7 +213,7 @@ static std::unique_ptr<DepthFused> build_depth_fused(BreezeModel & m, DepthRunne
             ggml_tensor * pick = ggml_argmax(ctx, ggml_reshape_2d(ctx, noisy, top_k, 1));
             ggml_tensor * code = ggml_get_rows(ctx, ggml_reshape_2d(ctx, top, 1, top_k), pick);
             codes = codes ? ggml_concat(ctx, codes, code, 0) : code;
-            for (int b = 0; b < nb; b++)
+            for (int b = 0; b < (guided ? 2 : 1); b++)
                 code_rows = code_rows ? ggml_concat(ctx, code_rows, code, 0) : code;
         }
     }
@@ -287,36 +290,44 @@ std::vector<std::vector<int>> DepthRunner::run_batch(BreezeModel & m, const std:
     const int nc = m.cfg.num_codebooks;
     const int hs = m.cfg.hidden_size;
     const int streams = (int) items.size();
-    const int rows = streams * n_branch;
-    auto & slot = fused[{ streams, top_k }];
-    if (!slot) slot = build_depth_fused(m, *this, streams, top_k);
+    std::vector<int> order;
+    for (int s = 0; s < streams; s++)
+        if (!items[s].hidden[1]) order.push_back(s);
+    const int n_plain = (int) order.size();
+    for (int s = 0; s < streams; s++)
+        if (items[s].hidden[1]) order.push_back(s);
+    const int n_cfg = streams - n_plain;
+    const int rows = n_plain + 2 * n_cfg;
+
+    auto & slot = fused[std::make_tuple(n_plain, n_cfg, top_k)];
+    if (!slot) slot = build_depth_fused(m, *this, n_plain, n_cfg, top_k);
     DepthFused & f = *slot;
 
     std::vector<int32_t> idx(rows);
     std::vector<float> hidden((size_t) rows * hs);
     std::vector<float> noise((size_t) top_k * (nc - 1) * streams);
     std::vector<float> cfg(streams), inv(streams);
-    for (int s = 0; s < streams; s++) {
-        const DepthItem & it = items[s];
-        for (int b = 0; b < n_branch; b++) {
-            idx[s * n_branch + b] = it.cb0;
-            std::copy(it.hidden[b]->begin(), it.hidden[b]->end(), hidden.begin() + (size_t) (s * n_branch + b) * hs);
+    for (int s = 0, row = 0; s < streams; s++) {
+        const DepthItem & it = items[order[s]];
+        for (int b = 0; b < (it.hidden[1] ? 2 : 1); b++, row++) {
+            idx[row] = it.cb0;
+            std::copy(it.hidden[b]->begin(), it.hidden[b]->end(), hidden.begin() + (size_t) row * hs);
         }
         cfg[s] = it.cfg_scale;
         inv[s] = 1.0f / (it.temperature > 0 ? it.temperature : 1.0f);
         // laid out per codebook then per stream, but each stream draws from its own rng in codebook order
         for (int h = 0; h < nc - 1; h++) {
-            float * row = noise.data() + (size_t) (h * streams + s) * top_k;
+            float * draw = noise.data() + (size_t) (h * streams + s) * top_k;
             for (int i = 0; i < top_k; i++) {
                 const double u = ((double) (*it.rng)() + 0.5) / 4294967296.0;
-                row[i] = (float) -std::log(-std::log(u));
+                draw[i] = (float) -std::log(-std::log(u));
             }
         }
     }
     ggml_backend_tensor_set(f.cb0, idx.data(), 0, idx.size() * sizeof(int32_t));
     ggml_backend_tensor_set(f.hidden, hidden.data(), 0, hidden.size() * sizeof(float));
     ggml_backend_tensor_set(f.noise, noise.data(), 0, noise.size() * sizeof(float));
-    if (n_branch > 1) ggml_backend_tensor_set(f.cfg, cfg.data(), 0, cfg.size() * sizeof(float));
+    if (n_cfg > 0) ggml_backend_tensor_set(f.cfg, cfg.data(), 0, cfg.size() * sizeof(float));
     ggml_backend_tensor_set(f.inv_temp, inv.data(), 0, inv.size() * sizeof(float));
 
     f.graph.replay(m.backend);
@@ -324,7 +335,7 @@ std::vector<std::vector<int>> DepthRunner::run_batch(BreezeModel & m, const std:
     ggml_backend_tensor_get(f.codes, out.data(), 0, out.size() * sizeof(int32_t));
     std::vector<std::vector<int>> codes(streams, std::vector<int>(nc - 1));
     for (int h = 0; h < nc - 1; h++)
-        for (int s = 0; s < streams; s++) codes[s][h] = out[(size_t) h * streams + s];
+        for (int s = 0; s < streams; s++) codes[order[s]][h] = out[(size_t) h * streams + s];
     return codes;
 }
 

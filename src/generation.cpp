@@ -248,37 +248,30 @@ void step_jobs(BreezeModel & m, GenPool & pool, const std::vector<SpeechJob *> &
     const SampleParams sp = DepthRunner::default_params(m);
     const int vs = m.cfg.audio_vocab_size;
     const int top_k = sp.top_k > 0 && sp.top_k < vs ? sp.top_k : vs;
-    for (int branches : { 1, 2 }) {
-        std::vector<SpeechJob *> group;
-        for (SpeechJob * j : jobs)
-            if (j->branches() == branches) group.push_back(j);
-        if (group.empty()) continue;
-        DepthRunner & depth = pool.runner(m, branches);
-        const auto td = std::chrono::steady_clock::now();
-        std::vector<std::vector<int>> codes;
-        if (DepthRunner::can_fuse(m, sp)) {
-            std::vector<DepthItem> items(group.size());
-            for (size_t i = 0; i < group.size(); i++) {
-                items[i].hidden[0] = &group[i]->o_c.hidden;
-                items[i].hidden[1] = &group[i]->o_u.hidden;
-                items[i].cb0 = group[i]->cb0;
-                items[i].cfg_scale = group[i]->req.cfg_scale;
-                items[i].temperature = sp.temperature;
-                items[i].rng = &group[i]->rng;
-            }
-            codes = depth.run_batch(m, items, top_k);
-        } else {
-            for (SpeechJob * j : group) {
-                std::vector<std::vector<float>> hiddens = { j->o_c.hidden };
-                if (j->use_cfg) hiddens.push_back(j->o_u.hidden);
-                codes.push_back(depth.run(m, hiddens, j->cb0, j->req.cfg_scale, j->rng));
-            }
+    const auto td = std::chrono::steady_clock::now();
+    std::vector<std::vector<int>> codes;
+    if (DepthRunner::can_fuse(m, sp)) {
+        std::vector<DepthItem> items(jobs.size());
+        for (size_t i = 0; i < jobs.size(); i++) {
+            items[i].hidden[0] = &jobs[i]->o_c.hidden;
+            items[i].hidden[1] = jobs[i]->use_cfg ? &jobs[i]->o_u.hidden : nullptr;
+            items[i].cb0 = jobs[i]->cb0;
+            items[i].cfg_scale = jobs[i]->req.cfg_scale;
+            items[i].temperature = sp.temperature;
+            items[i].rng = &jobs[i]->rng;
         }
-        const double depth_ms = ms_since(td);
-        for (size_t i = 0; i < group.size(); i++) {
-            group[i]->tm.depth += depth_ms;
-            group[i]->after_depth(codes[i]);
+        codes = pool.runner(m, 1).run_batch(m, items, top_k);
+    } else {
+        for (SpeechJob * j : jobs) {
+            std::vector<std::vector<float>> hiddens = { j->o_c.hidden };
+            if (j->use_cfg) hiddens.push_back(j->o_u.hidden);
+            codes.push_back(pool.runner(m, j->branches()).run(m, hiddens, j->cb0, j->req.cfg_scale, j->rng));
         }
+    }
+    const double depth_ms = ms_since(td);
+    for (size_t i = 0; i < jobs.size(); i++) {
+        jobs[i]->tm.depth += depth_ms;
+        jobs[i]->after_depth(codes[i]);
     }
 
     std::vector<SpeechJob *> live;

@@ -35,7 +35,7 @@ static void usage() {
            "  --rep-penalty <f>   repetition penalty, 0 keeps the model default\n"
            "  --max-new <n>       max frames to generate\n"
            "  --output <wav>      output path (default output.wav)\n"
-           "  --chunk-first <n>   frames in the first streamed chunk (default 4)\n"
+           "  --chunk-first <n>   frames in the first streamed chunk (default 1)\n"
            "  --chunk-max <n>     frames the chunk ramps up to (default 25)\n"
            "  --timings           print a stage by stage latency breakdown\n"
            "  --cpu               force CPU backend\n");

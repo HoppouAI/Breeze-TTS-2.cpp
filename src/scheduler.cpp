@@ -190,20 +190,23 @@ void GenScheduler::loop() {
 
 void GenScheduler::warm_up(const GenRequest & base) {
     exec([&] {
-        GenRequest req = base;
-        req.text = warm_up_text();
-        req.instruction = GenRequest().instruction;
-        req.max_new_tokens = 8;
-        req.pace = false;
+        GenRequest plain = base;
+        plain.text = warm_up_text();
+        plain.instruction = GenRequest().instruction;
+        plain.max_new_tokens = 8;
+        plain.pace = false;
+        plain.cfg_scale = 1.0f;
+        GenRequest guided = plain;
+        guided.cfg_scale = 2.0f;
         const AudioCallback drop = [](const float *, int) { return true; };
-        const auto batch_of = [&](int streams) {
+        const auto batch_of = [&](int n_plain, int n_cfg) {
             GenTimings tm;
             PlayClock clock;
             std::deque<SpeechJob> jobs;
             std::vector<SpeechJob *> all;
-            for (int s = 0; s < streams; s++) {
-                jobs.emplace_back(*m_model, m_pool, req, req.text, ChunkRef(), (uint32_t) s, drop, tm,
-                                  std::chrono::steady_clock::now(), clock);
+            for (int s = 0; s < n_plain + n_cfg; s++) {
+                jobs.emplace_back(*m_model, m_pool, s < n_plain ? plain : guided, plain.text, ChunkRef(), (uint32_t) s,
+                                  drop, tm, std::chrono::steady_clock::now(), clock);
                 jobs.back().start();
                 all.push_back(&jobs.back());
             }
@@ -216,10 +219,10 @@ void GenScheduler::warm_up(const GenRequest & base) {
             }
             for (SpeechJob * j : all) j->finish();
         };
-        req.cfg_scale = 1.0f;
-        for (int streams = 1; streams <= m_parallel; streams++) batch_of(streams);
-        req.cfg_scale = 2.0f;
-        for (int streams = 1; streams <= std::max(1, m_parallel / 2); streams++) batch_of(streams);
+        // every mix the slots allow, a cfg stream still fits at --parallel 1
+        for (int n_cfg = 0; n_cfg <= std::max(1, m_parallel / 2); n_cfg++)
+            for (int n_plain = n_cfg ? 0 : 1; n_plain + 2 * n_cfg <= std::max(m_parallel, n_cfg * 2); n_plain++)
+                batch_of(n_plain, n_cfg);
     });
 }
 
