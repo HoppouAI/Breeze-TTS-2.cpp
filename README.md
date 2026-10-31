@@ -37,9 +37,9 @@ decodes new frames, and several streams sharing one GPU batch. On top of that, t
 with a matmul, which is not from that post and was the biggest single win on CUDA.
 
 Real time factor for one stream on one RTX 3060 12 GB, with its tensor core limit unlocked, v0.1.5 and
-the current code run back to back on the same seeds:
+v0.1.6 run back to back on the same seeds:
 
-| Model | `cfg_scale` | v0.1.5 | Now |
+| Model | `cfg_scale` | v0.1.5 | v0.1.6 |
 | --- | --- | --- | --- |
 | Q4_K | 1 | 2.15x | 2.41x |
 | Q4_K | 3 | 1.53x | 1.74x |

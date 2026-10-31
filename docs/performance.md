@@ -9,7 +9,7 @@ playback. Repeat runs move by a few percent, and other programs using the GPU mo
 further, so measure your own card before you size anything from these tables.
 [Measuring](#measuring) shows how.
 
-## What's new since v0.1.5
+## What's new in v0.1.6
 
 - **The vocoder only decodes new frames.** It used to decode about 88 frames of old
   audio again on every flush and throw that output away. It now keeps its state
@@ -28,10 +28,10 @@ further, so measure your own card before you size anything from these tables.
 - **The WebSocket waits for a free slot.** A session only reports `queued` when every
   slot is taken, and it no longer holds the whole GPU while it speaks.
 
-One stream on Vulkan, v0.1.5 and the current code run back to back, averaged over 4
+One stream on Vulkan, v0.1.5 and v0.1.6 run back to back, averaged over 4
 seeds. All of the gain is in the vocoder, the backbone and depth decoder did not change:
 
-| Model | `cfg_scale` | v0.1.5 | Now |
+| Model | `cfg_scale` | v0.1.5 | v0.1.6 |
 | --- | --- | --- | --- |
 | Q4_K | 1 | 2.15x | 2.41x |
 | Q4_K | 3 | 1.53x | 1.74x |
