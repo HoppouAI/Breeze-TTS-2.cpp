@@ -271,6 +271,12 @@ int run_server(const ServerOptions & opts) {
             } else if (!f.content.empty()) {
                 read_wav_buffer((const uint8_t *) f.content.data(), f.content.size(), sr, g.ref_audio);
             }
+            // without this a bad clip quietly turns a clone into voice design
+            if (!f.content.empty() && g.ref_codes.empty() && g.ref_audio.empty()) {
+                res.status = 400;
+                res.set_content("{\"error\":\"could not read ref_audio\"}", "application/json");
+                return;
+            }
         }
         const std::string vid = field(req, "voice_id", "");
         if (!vid.empty() && !store.take(vid, g.ref_codes, g.ref_frames, g.ref_text)) {

@@ -36,44 +36,58 @@ bool read_wav(const std::string & path, int target_sr, std::vector<float> & out)
 }
 
 bool read_wav_buffer(const uint8_t * buf, size_t size, int target_sr, std::vector<float> & out) {
-    if (size < 44 || std::memcmp(buf, "RIFF", 4) != 0) return false;
+    if (size < 44 || std::memcmp(buf, "RIFF", 4) != 0 || std::memcmp(buf + 8, "WAVE", 4) != 0) return false;
 
-    int channels = 1, sr = target_sr, bits = 16, fmt = 1;
+    bool have_fmt = false;
+    int channels = 0, bits = 0, fmt = 0;
+    uint32_t sr = 0;
     size_t pos = 12, data_off = 0, data_len = 0;
-    while (pos + 8 <= (size_t) size) {
+    while (size - pos >= 8) {
         const uint8_t * ch = &buf[pos];
-        uint32_t clen = rd_u32(ch + 4);
-        if (std::memcmp(ch, "fmt ", 4) == 0) {
+        const size_t clen = rd_u32(ch + 4);
+        const size_t left = size - pos - 8;
+        if (std::memcmp(ch, "fmt ", 4) == 0 && clen >= 16 && left >= clen) {
+            have_fmt = true;
             fmt = rd_u16(ch + 8);
             channels = rd_u16(ch + 10);
             sr = rd_u32(ch + 12);
             bits = rd_u16(ch + 22);
+            // extensible keeps the real format code at the start of its guid
+            if (fmt == 0xfffe && clen >= 26) fmt = rd_u16(ch + 32);
         } else if (std::memcmp(ch, "data", 4) == 0) {
             data_off = pos + 8;
-            data_len = clen;
+            // streamed wavs say max length here, so the bytes we actually got are what count
+            data_len = clen < left ? clen : left;
         }
+        if (clen >= left) break;
         pos += 8 + clen + (clen & 1);
     }
-    if (!data_off) return false;
+    if (!data_off || !have_fmt || channels < 1) return false;
+    if (sr < 1000 || sr > 768000) return false;
+    const bool is_int = fmt == 1 && (bits == 8 || bits == 16 || bits == 24 || bits == 32);
+    const bool is_flt = fmt == 3 && bits == 32;
+    if (!is_int && !is_flt) return false;
 
     std::vector<float> mono;
     const uint8_t * d = &buf[data_off];
     const int bytes = bits / 8;
-    const int frames = (int) (data_len / (bytes * channels));
+    const size_t frames = data_len / ((size_t) bytes * channels);
     mono.resize(frames);
-    for (int i = 0; i < frames; i++) {
+    for (size_t i = 0; i < frames; i++) {
         float acc = 0.0f;
         for (int c = 0; c < channels; c++) {
-            const uint8_t * s = d + (size_t) (i * channels + c) * bytes;
+            const uint8_t * s = d + (i * channels + c) * bytes;
             float v = 0.0f;
             if (fmt == 3 && bits == 32) std::memcpy(&v, s, 4);
+            else if (bits == 8) v = ((int) s[0] - 128) / 128.0f;
             else if (bits == 16) v = (int16_t) rd_u16(s) / 32768.0f;
+            else if (bits == 24) v = (int32_t) ((uint32_t) s[0] << 8 | (uint32_t) s[1] << 16 | (uint32_t) s[2] << 24) / 2147483648.0f;
             else if (bits == 32) v = (int32_t) rd_u32(s) / 2147483648.0f;
             acc += v;
         }
         mono[i] = acc / channels;
     }
-    out = resample_linear(mono, sr, target_sr);
+    out = resample_linear(mono, (int) sr, target_sr);
     return true;
 }
 
