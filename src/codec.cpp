@@ -13,12 +13,9 @@ static ggml_tensor * transpose_cont(ggml_context * ctx, ggml_tensor * x) {
 }
 
 std::vector<float> MimiCodec::decode(const std::vector<int> & codes, int T, int n_cb) {
-    if (n_cb <= 0) n_cb = m->cfg.num_codebooks;
-    Graph g(32768);
-    ggml_tensor * x = vocoder_decode(g.ctx, *m, g, codes, n_cb, T);
-    ggml_tensor * audio = ggml_cont(g.ctx, ggml_reshape_1d(g.ctx, x, x->ne[0]));
-    g.compute(m->backend, audio);
-    return tensor_to_f32(audio);
+    VocoderStream s;
+    s.init(*m);
+    return s.decode(codes, T, n_cb);
 }
 
 static int nearest(const std::vector<float> & book, const float * v, int dim, int n) {

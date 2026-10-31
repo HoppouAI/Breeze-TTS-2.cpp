@@ -138,18 +138,17 @@ static bool generate_chunk(BreezeModel & m, MimiCodec & codec, const GenRequest 
     // the first flush is small so audio starts early, then it grows to keep the vocoder efficient
     const int chunk_max = std::max(1, req.chunk_max);
     int chunk = std::min(std::max(1, req.chunk_first), chunk_max);
-    // the transformer window plus the slack the vocoder convolutions reach back over
-    const int ctx = m.cfg.voc.sliding_window + 16;
+    VocoderStream voc;
+    voc.init(m);
     const double frame_audio_ms = 1000.0 * spf / m.cfg.sample_rate;
     const auto ema = [](double & avg, double v) { avg = avg > 0 ? avg * 0.7 + v * 0.3 : v; };
     // a flush has to start while the listener still has enough left to cover decoding it
     const auto due_early = [&](int pending) {
         if (!req.pace || !clock.started || clock.voc_ms <= 0) return false;
-        const int span = emitted + pending - (emitted > ctx ? emitted - ctx : 0);
         // generating and decoding it has to take well under what it plays, or small flushes spiral
-        if (pending * clock.frame_ms + 1.2 * clock.voc_ms * span >= pending * frame_audio_ms) return false;
+        if (pending * clock.frame_ms + 1.2 * clock.voc_ms * pending >= pending * frame_audio_ms) return false;
         const double left = std::chrono::duration<double, std::milli>(clock.runs_out - clock_now()).count();
-        return left < 1.25 * (clock.frame_ms + clock.voc_ms * (span + 1)) + 100.0;
+        return left < 1.25 * (clock.frame_ms + clock.voc_ms * (pending + 1)) + 100.0;
     };
     auto flush = [&](bool final_flush) {
         const int have = (int) frames.size() / nc;
@@ -159,22 +158,19 @@ static bool generate_chunk(BreezeModel & m, MimiCodec & codec, const GenRequest 
             if (!full && !early) break;
             const int start = emitted;
             const int count = full && !final_flush ? chunk : have - emitted;
-            const int ctx_start = start > ctx ? start - ctx : 0;
-            const int sub_T = start + count - ctx_start;
-            std::vector<int> sub(frames.begin() + (size_t) ctx_start * nc, frames.begin() + (size_t) (start + count) * nc);
+            std::vector<int> sub(frames.begin() + (size_t) start * nc, frames.begin() + (size_t) (start + count) * nc);
             const auto tv = clock_now();
-            std::vector<float> audio = codec.decode(sub, sub_T);
+            std::vector<float> audio = voc.decode(sub, count);
             const double vtime = since(tv);
             tm.vocoder += vtime;
-            ema(clock.voc_ms, vtime / sub_T);
+            ema(clock.voc_ms, vtime / count);
             tm.flushes++;
-            const int skip = (start - ctx_start) * spf;
             if (!tm.first_audio) {
                 tm.first_vocoder = vtime;
-                tm.first_frames = sub_T;
+                tm.first_frames = count;
                 tm.first_audio = since(t_start);
             }
-            if (!cb(audio.data() + skip, count * spf)) return false;
+            if (!cb(audio.data(), count * spf)) return false;
             const auto now = clock_now();
             if (!clock.started || clock.runs_out < now) clock.runs_out = now;
             clock.runs_out += std::chrono::microseconds((long long) (count * frame_audio_ms * 1000.0));
@@ -313,9 +309,11 @@ void warm_up(BreezeModel & m, MimiCodec & codec, const GenRequest & base) {
     generate(m, codec, req, drop);
     // vulkan picks matmul pipelines by size class, so touch the spread of chunk lengths a stream uses
     const int nc = m.cfg.num_codebooks;
-    for (int T : { 1, 2, 4, 8, 16, 32, 64, m.cfg.voc.sliding_window + 16 + std::max(1, base.chunk_max) }) {
+    VocoderStream voc;
+    voc.init(m);
+    for (int T : { 1, 2, 4, 8, 16, 32, 64, std::max(1, base.chunk_max) }) {
         std::vector<int> codes((size_t) T * nc, 0);
-        codec.decode(codes, T);
+        voc.decode(codes, T);
     }
 }
 
@@ -408,22 +406,17 @@ std::vector<float> convert_voice(BreezeModel & m, MimiCodec & codec, const std::
     if (use_cfg) st_u.free();
     depth.free();
 
-    // the vocoder upsamples 1920x, so decoding a long clip in one graph asks for gigabytes at once.
-    // walk it in windows with enough left context for the convolutions to reach back over
-    const int spf = m.cfg.samples_per_frame;
-    const int ctx = m.cfg.voc.sliding_window + 16;
+    // the vocoder upsamples 1920x, so decoding a long clip in one graph asks for gigabytes at once
     const int step = 40;
+    VocoderStream voc;
+    voc.init(m);
     std::vector<float> audio;
-    audio.reserve((size_t) src_T * spf);
+    audio.reserve((size_t) src_T * m.cfg.samples_per_frame);
     for (int start = 0; start < src_T; start += step) {
         const int count = std::min(step, src_T - start);
-        const int cs = start > ctx ? start - ctx : 0;
-        std::vector<int> sub(out.begin() + (size_t) cs * nc, out.begin() + (size_t) (start + count) * nc);
-        std::vector<float> part = codec.decode(sub, start + count - cs);
-        const size_t skip = (size_t) (start - cs) * spf;
-        const size_t want = (size_t) count * spf;
-        if (part.size() < skip + want) break;
-        audio.insert(audio.end(), part.begin() + skip, part.begin() + skip + want);
+        std::vector<int> sub(out.begin() + (size_t) start * nc, out.begin() + (size_t) (start + count) * nc);
+        std::vector<float> part = voc.decode(sub, count);
+        audio.insert(audio.end(), part.begin(), part.end());
     }
     return audio;
 }

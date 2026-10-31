@@ -43,7 +43,7 @@ struct PlayClock {
     bool started = false;
     std::chrono::steady_clock::time_point runs_out;
     double frame_ms = 0; // backbone plus depth per frame
-    double voc_ms = 0;   // vocoder per decoded frame, context included
+    double voc_ms = 0;   // vocoder per decoded frame
 };
 
 // break text on sentence boundaries into pieces worth roughly budget characters, cjk counted heavier.

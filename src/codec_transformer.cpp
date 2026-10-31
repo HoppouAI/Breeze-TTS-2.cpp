@@ -1,5 +1,6 @@
 #include "breeze/codec.h"
 
+#include <algorithm>
 #include <cmath>
 #include <string>
 
@@ -45,15 +46,37 @@ ggml_tensor * mimi_transformer(ggml_context * ctx, BreezeModel & m, Graph & g, g
 }
 
 // vocoder pre-transformer over [hidden, seq_len]; rms norm, swiglu MLP, causal sliding window
-ggml_tensor * vocoder_transformer(ggml_context * ctx, BreezeModel & m, Graph & g, ggml_tensor * x, int T) {
+// keys stay unrotated in the state, the window slides so their positions keep changing
+ggml_tensor * vocoder_transformer(ggml_context * ctx, BreezeModel & m, Graph & g, VocoderStream & s, ggml_tensor * x, int T) {
     const VocoderConfig & c = m.cfg.voc;
     const float scale = 1.0f / std::sqrt((float) c.head_dim);
+    const int window = c.sliding_window - 1;
+    const int n_hist = s.kv_len;
+    const int total = n_hist + T;
+    const int keep = std::min(window, total);
 
-    std::vector<int32_t> pos_i(T);
-    for (int i = 0; i < T; i++) pos_i[i] = i;
-    ggml_tensor * pos = g.input_i32(pos_i, T);
-    std::vector<float> mask_v = build_causal_mask(T, T, 0, c.sliding_window);
-    ggml_tensor * mask = g.input_f32(mask_v, T, T);
+    std::vector<int32_t> pos_i(total);
+    for (int i = 0; i < total; i++) pos_i[i] = i;
+    ggml_tensor * pos = g.input_i32(pos_i, total);
+    std::vector<int32_t> pos_q(T);
+    for (int i = 0; i < T; i++) pos_q[i] = n_hist + i;
+    ggml_tensor * qpos = g.input_i32(pos_q, T);
+    std::vector<float> mask_v = build_causal_mask(T, total, n_hist, c.sliding_window);
+    ggml_tensor * mask = g.input_f32(mask_v, total, T);
+
+    const auto extend = [&](ggml_tensor * cur) {
+        ggml_tensor * state = s.slot(c.head_dim, c.n_kv_head, window);
+        ggml_tensor * all = cur;
+        if (n_hist > 0) {
+            ggml_tensor * old = ggml_view_3d(ctx, state, c.head_dim, c.n_kv_head, n_hist, state->nb[1], state->nb[2], 0);
+            all = ggml_concat(ctx, old, cur, 2);
+        }
+        ggml_tensor * newest = ggml_view_3d(ctx, all, c.head_dim, c.n_kv_head, keep, all->nb[1], all->nb[2],
+                                            (size_t) (total - keep) * all->nb[2]);
+        ggml_tensor * dst = ggml_view_3d(ctx, state, c.head_dim, c.n_kv_head, keep, state->nb[1], state->nb[2], 0);
+        g.write(ggml_cpy(ctx, newest, dst));
+        return all;
+    };
 
     ggml_tensor * h = ggml_add(ctx, linear(ctx, m.w("codec.dtf.in_proj.weight"), x),
                                m.w("codec.dtf.in_proj.bias"));
@@ -64,7 +87,9 @@ ggml_tensor * vocoder_transformer(ggml_context * ctx, BreezeModel & m, Graph & g
         ggml_tensor * q = ggml_reshape_3d(ctx, linear(ctx, m.w(p + ".attn_q.weight"), cur), c.head_dim, c.n_head, T);
         ggml_tensor * k = ggml_reshape_3d(ctx, linear(ctx, m.w(p + ".attn_k.weight"), cur), c.head_dim, c.n_kv_head, T);
         ggml_tensor * v = ggml_reshape_3d(ctx, linear(ctx, m.w(p + ".attn_v.weight"), cur), c.head_dim, c.n_kv_head, T);
-        q = ggml_rope_ext(ctx, q, pos, nullptr, c.head_dim, GGML_ROPE_TYPE_NEOX, 0, c.rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+        k = extend(k);
+        v = extend(v);
+        q = ggml_rope_ext(ctx, q, qpos, nullptr, c.head_dim, GGML_ROPE_TYPE_NEOX, 0, c.rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
         k = ggml_rope_ext(ctx, k, pos, nullptr, c.head_dim, GGML_ROPE_TYPE_NEOX, 0, c.rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
         ggml_tensor * a = attention(ctx, q, k, v, mask, scale, c.n_head, c.n_kv_head);
         a = linear(ctx, m.w(p + ".attn_output.weight"), a);
