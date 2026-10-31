@@ -33,6 +33,7 @@ breeze-server <model.gguf> [--host H] [--port P] [--webui] [--cpu]
 | `--port` | `8080` | TCP port. |
 | `--webui` | off | Also serve the browser UI at `/`. |
 | `--cpu` | off | Force the CPU backend instead of Vulkan. |
+| `--te-cpu` | off | Run the text encoder on the CPU and keep its weights in system memory, saving about 0.9 GB of video memory. See [build.md](build.md#troubleshooting). |
 | `--chunk-first` | `1` | Fewest frames in the first streamed chunk. It goes up on its own when the GPU is too busy to stay ahead with that few. |
 | `--chunk-max` | `25` | Frames the chunk ramps up to. |
 | `--verbose` | off | Add a per stage timing breakdown after each request. |

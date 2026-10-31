@@ -30,6 +30,7 @@ breeze-cli <model.gguf> --text <text> [options]
 | `--chunk-max <n>` | `25` | Frames the chunk ramps up to. |
 | `--timings` | off | Print a stage by stage latency breakdown. |
 | `--cpu` | off | Force the CPU backend. |
+| `--te-cpu` | off | Run the text encoder on the CPU and keep its weights in system memory. Saves about 0.9 GB of video memory for about 0.5 s more before the first audio. `BREEZE_TE_THREADS` sets its threads (default half the cores). |
 | `-h`, `--help` | | Print usage. |
 
 Progress prints as `generated N.NN s` while the audio streams in.
