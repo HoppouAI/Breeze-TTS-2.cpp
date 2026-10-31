@@ -122,7 +122,7 @@ int run_server(const ServerOptions & opts) {
 #endif
     BreezeModel model;
     printf("loading %s ...\n", opts.model.c_str());
-    if (!model.load(opts.model, opts.use_gpu)) {
+    if (!model.load(opts.model, opts.use_gpu, opts.te_cpu)) {
         fprintf(stderr, "failed to load model\n");
         return 1;
     }

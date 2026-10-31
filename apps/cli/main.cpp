@@ -38,7 +38,8 @@ static void usage() {
            "  --chunk-first <n>   frames in the first streamed chunk (default 1)\n"
            "  --chunk-max <n>     frames the chunk ramps up to (default 25)\n"
            "  --timings           print a stage by stage latency breakdown\n"
-           "  --cpu               force CPU backend\n");
+           "  --cpu               force CPU backend\n"
+           "  --te-cpu            text encoder on the CPU, about 0.9 GB less video memory\n");
 }
 
 int main(int argc, char ** argv) {
@@ -50,6 +51,7 @@ int main(int argc, char ** argv) {
     std::string voice_name, save_voice_name, voice_description, voices_dir = "voices";
     bool list_voices = false;
     bool use_gpu = true;
+    bool te_cpu = false;
     bool show_timings = false;
 
     for (int i = 2; i < argc; i++) {
@@ -76,6 +78,7 @@ int main(int argc, char ** argv) {
         else if (a == "--output") output = arg(argc, argv, i, "--output");
         else if (a == "--timings") show_timings = true;
         else if (a == "--cpu") use_gpu = false;
+        else if (a == "--te-cpu") te_cpu = true;
         else if (a == "-h" || a == "--help") { usage(); return 0; }
         else { fprintf(stderr, "unknown arg: %s\n", a.c_str()); return 1; }
     }
@@ -120,7 +123,7 @@ int main(int argc, char ** argv) {
 
     BreezeModel model;
     printf("loading %s ...\n", model_path.c_str());
-    if (!model.load(model_path, use_gpu)) { fprintf(stderr, "failed to load model\n"); return 1; }
+    if (!model.load(model_path, use_gpu, te_cpu)) { fprintf(stderr, "failed to load model\n"); return 1; }
     printf("backend: %s, sample rate: %d\n", model.backend.name(), model.cfg.sample_rate);
 
     if (!ref_audio_path.empty()) {

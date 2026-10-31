@@ -9,6 +9,7 @@ struct ServerOptions {
     std::string host = "127.0.0.1";
     int port = 8080;
     bool use_gpu = true;
+    bool te_cpu = false;
     bool webui = false;
     bool verbose = false;
     std::string voices_dir = "voices";
