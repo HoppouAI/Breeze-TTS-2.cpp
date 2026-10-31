@@ -24,12 +24,16 @@ endif()
 
 set(GGML_VULKAN ${BREEZE_VULKAN} CACHE BOOL "" FORCE)
 set(GGML_CUDA ${BREEZE_CUDA} CACHE BOOL "" FORCE)
+# ggml leaves these off unless its built by llama.cpp
+set(GGML_CUDA_GRAPHS ${BREEZE_CUDA} CACHE BOOL "" FORCE)
 set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(GGML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 if(MINGW)
     # libgomp has no static build here, and it would leak into the shared library
     set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
 endif()
+# msvc builds ggml as dlls, they have to land next to the exes
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 add_subdirectory(third_party/ggml)
 
 set(BREEZE_SOURCES

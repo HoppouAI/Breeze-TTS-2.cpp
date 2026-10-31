@@ -23,9 +23,28 @@ ggml_tensor * conv1d_causal(ggml_context * ctx, ggml_tensor * w, ggml_tensor * b
 
 ggml_tensor * convtr1d_causal(ggml_context * ctx, ggml_tensor * w, ggml_tensor * b,
                               ggml_tensor * x, int stride) {
-    ggml_tensor * y = ggml_conv_transpose_1d(ctx, w, x, stride, 0, 1);
-    const int keep = (int) x->ne[0] * stride;
-    y = ggml_cont(ctx, ggml_view_2d(ctx, y, keep, y->ne[1], y->nb[1], 0));
+    const int K = (int) w->ne[0];
+    const int C_out = (int) w->ne[1];
+    const int L = (int) x->ne[0];
+    ggml_tensor * y = nullptr;
+    if (K % stride == 0) {
+        // matmul then overlap add, the cuda conv_transpose_1d kernel is a per sample loop and takes seconds
+        ggml_tensor * a = ggml_cont(ctx, ggml_permute(ctx, w, 2, 1, 0, 3));
+        a = ggml_reshape_2d(ctx, a, a->ne[0], (int64_t) C_out * K);
+        ggml_tensor * r = ggml_mul_mat(ctx, a, ggml_cont(ctx, ggml_transpose(ctx, x)));
+        const int64_t block = (int64_t) C_out * stride;
+        for (int j = 0; j < K / stride && j < L; j++) {
+            ggml_tensor * seg = ggml_cont(ctx, ggml_view_2d(ctx, r, block, L - j, r->nb[1], (size_t) (j * block) * r->nb[0]));
+            // pad flat, cuda pad makes ne1 a grid dim and those stop at 65535
+            seg = ggml_reshape_1d(ctx, seg, block * (L - j));
+            if (j) seg = ggml_pad_ext(ctx, seg, j * (int) block, 0, 0, 0, 0, 0, 0, 0);
+            y = y ? ggml_add(ctx, y, seg) : seg;
+        }
+        y = ggml_cont(ctx, ggml_transpose(ctx, ggml_reshape_2d(ctx, y, C_out, (int64_t) L * stride)));
+    } else {
+        y = ggml_conv_transpose_1d(ctx, w, x, stride, 0, 1);
+        y = ggml_cont(ctx, ggml_view_2d(ctx, y, (int64_t) L * stride, y->ne[1], y->nb[1], 0));
+    }
     if (b) y = ggml_add(ctx, y, ggml_reshape_2d(ctx, b, 1, b->ne[0]));
     return y;
 }
