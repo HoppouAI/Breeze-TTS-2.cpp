@@ -122,7 +122,7 @@ $$\text{logits} = \text{uncond} + s \cdot (\text{cond} - \text{uncond})$$
 
 The depth decoder runs both branches in **one graph**, not two. Each weight is
 read once for both branches, so the second one costs about 40% rather than a
-doubling: 23.86 ms per frame at `cfg_scale` 1 against 33.21 ms at 3.
+doubling: 23.2 ms per frame at `cfg_scale` 1 against 31.8 ms at 3.
 
 The two branches share one KV cache, interleaved as
 `slot = pos * n_branch + branch`. That keeps the tokens written each step
@@ -139,8 +139,8 @@ decoder:
 
 | `cfg_scale` | Backbone | Depth | Vocoder | Total per frame | Real time factor |
 | --- | --- | --- | --- | --- | --- |
-| 1 | 9.95 ms | 23.86 ms | 13.04 ms | 46.85 ms | 1.71x |
-| 3 | 13.81 ms | 33.21 ms | 13.72 ms | 60.74 ms | 1.32x |
+| 1 | 8.5 ms | 23.2 ms | 5.3 ms | 37.0 ms | 2.16x |
+| 3 | 11.9 ms | 31.8 ms | 6.1 ms | 49.8 ms | 1.61x |
 
 Cloning adds a one off reference encode of roughly 650 ms, which lands on time to
 first audio and not on throughput.
@@ -150,8 +150,8 @@ first audio and not on throughput.
 Audio is flushed in growing chunks. The first is 4 frames (320 ms) so playback
 can start early, and each flush grows by a third up to 25 frames (2 s) by
 default, which keeps the vocoder running on batches big enough to amortise its
-fixed cost. On an RTX 3060 at Q4_K that puts time to first audio around 350 ms
-against roughly 1.35 s for a fixed 25 frame chunk. Both ends of the ramp are
+fixed cost. On an RTX 3060, Q8_0 with a Q4_K depth decoder, that puts time to first audio
+around 230 ms against roughly 920 ms for a fixed 25 frame chunk. Both ends of the ramp are
 configurable, see [server.md](server.md).
 
 Each flush decodes with `sliding_window + 16` frames of left context and
@@ -160,14 +160,15 @@ not enough: the convolutions either side of it reach back about another 16
 frames, and truncating there costs about 8 dB against a single pass decode.
 
 That context is re-decoded every flush, so the chunk size sets how much vocoder
-work is thrown away. A 25 frame chunk decodes 113 frames to emit 25. Going to 40
-frames takes the vocoder from 13.15 to 10.87 ms per emitted frame, which is worth
-about 7% off total generation time. Past 40 there is nothing left to reclaim.
+work is thrown away. A 25 frame chunk decodes 113 frames to emit 25, at about
+6 ms per emitted frame on a long clip. Going to 40 frames takes that to 4.5 ms,
+which is worth about 7% off total generation time, and 60 frames adds very little
+more.
 
 Chunking also shapes what the client has to do. The queue drains continuously but
 refills once per chunk, so a client needs to hold more audio than a chunk takes
 to produce, not merely delay its first chunk. Producing 40 frames takes about
-2.5 s, so a client sitting on 0.5 s runs dry even when the average rate is well
+2 s, so a client sitting on 0.5 s runs dry even when the average rate is well
 ahead of playback.
 
 ## Where the time goes
@@ -177,9 +178,9 @@ Measured on an RTX 3060 at Q8_0 with a Q4_K depth decoder, per frame of audio
 
 | Stage | Per frame | Share |
 | --- | --- | --- |
-| Backbone decode | 9.95 ms | 21% |
-| Depth decode | 23.86 ms | 51% |
-| Vocoder | 13.04 ms | 28% |
+| Backbone decode | 8.5 ms | 23% |
+| Depth decode | 23.2 ms | 63% |
+| Vocoder | 5.3 ms | 14% |
 
 The depth decoder dominates because it runs 15 sequential steps per frame, one
 per codebook, and each step is a full 12 layer forward pass over a single token.

@@ -123,12 +123,12 @@ curl -s -o out.pcm -w "%{time_total}\n" \
 ```
 
 Audio seconds are `bytes / 2 / 24000`, so the factor is that divided by
-`time_total`. On an RTX 3060 a long clip measures about 1.8x at Q4_K and 1.5x
+`time_total`. On an RTX 3060 a long clip measures about 2.2x at Q4_K and 1.8x
 at Q8_0 with the defaults. A busy GPU still eats into that.
 
 Guidance costs less than it looks like it should. `cfg_scale` above 1 adds a
 second forward pass, but the depth decoder batches both branches into one graph,
-so a 26 second passage at `cfg_scale` 3 measures 1.44x at Q4_K and 1.31x at
+so a 28 second passage at `cfg_scale` 3 measures 1.62x at Q4_K and 1.50x at
 Q8_0, still comfortably above realtime. Cloning also adds a one off
 reference encode of roughly 650 ms, which shows up in time to first audio rather
 than in the rate.
@@ -146,7 +146,7 @@ looks fine.
 
 The client's queue drains continuously but refills in one lump per chunk, so the
 queue has to be deeper than the time it takes to produce a whole chunk. At
-`--chunk-max 40` a chunk is 3.2 s of audio that takes roughly 2.5 s to generate,
+`--chunk-max 40` a chunk is 3.2 s of audio that takes roughly 2 s to generate,
 so a client holding only 0.5 s of audio runs dry waiting for it, even though the
 average rate is comfortably ahead.
 
@@ -192,22 +192,21 @@ grows by a third each flush until it reaches `--chunk-max`.
 Every flush also re-decodes `sliding_window + 16` frames of left context and
 throws that audio away, so small chunks are expensive. At 25 frames the vocoder
 decodes 113 frames to emit 25. Raising the ceiling reclaims most of it, measured
-on an RTX 3060 at Q8_0 before the depth decoder got faster, so today's totals are
-lower but the vocoder column still holds:
+on an RTX 3060 at Q8_0 over a 27 second passage:
 
 | `--chunk-max` | Vocoder per frame | Total per frame | Real time factor |
 | --- | --- | --- | --- |
-| 25 | 13.15 ms | 66.11 ms | 1.21x |
-| 40 | 10.87 ms | 62.10 ms | 1.29x |
-| 60 | 10.89 ms | 62.25 ms | 1.29x |
+| 25 | 6.09 ms | 42.91 ms | 1.86x |
+| 40 | 4.53 ms | 40.03 ms | 2.00x |
+| 60 | 3.91 ms | 39.51 ms | 2.02x |
 
 Past about 40 the context is amortised and there is nothing left to win, while
 chunks keep getting slower to produce and demand a deeper client queue.
 
 Lower `--chunk-first` for a faster start. Four frames is about 320 ms of audio
-and lands near 400 ms on an RTX 3060; one frame gets there in roughly 220 ms but
-flushes far more often. It only affects the first chunk, so it costs nothing in
-throughput.
+and lands near 240 ms on an RTX 3060 at Q8_0 with a Q4_K depth decoder; one frame
+gets there in roughly 130 ms but the chunks stay smaller for longer, which cost
+about 5% of throughput on a short clip.
 
 Setting both flags to the same value disables the ramp and streams a fixed size.
 

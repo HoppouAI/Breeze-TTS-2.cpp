@@ -55,38 +55,41 @@ cmake --build build-cpu -j
 | `BREEZE_BUILD_SHARED` | `ON` | Build the shared C library. |
 | `BREEZE_MP3` | `ON` | Let the server encode MP3 for OpenAI style requests, using the `third_party/shine` submodule. Off, or with the submodule missing, those requests get WAV instead. |
 
-### CUDA is slower here, and it is worth knowing why
+### Vulkan or CUDA
 
-CUDA looks like the obvious win, because the depth decoder is bound by dispatch
-overhead and CUDA graphs exist to fix exactly that. Measured on an RTX 3060 it is
-not, by a wide margin:
+Vulkan stays the default. It is a little ahead at Q4_K and Q8_0, level at F16, and
+it needs no toolkit. Measured on an RTX 3060, per frame of audio (80 ms):
 
-| Backend | Backbone | Depth | Vocoder | Total per frame | Real time factor |
-| --- | --- | --- | --- | --- | --- |
-| Vulkan | 7.69 ms | 34.03 ms | 10.44 ms | 52.16 ms | 1.53x |
-| CUDA | 10.32 ms | 69.64 ms | 57.45 ms | 137.41 ms | 0.58x |
-| CUDA, `GGML_CUDA_DISABLE_GRAPHS=1` | 11.45 ms | 77.23 ms | 60.27 ms | 148.95 ms | 0.54x |
+| Model | `cfg_scale` | Backend | Backbone | Depth | Vocoder | Total per frame | Real time factor |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Q4_K | 1 | Vulkan | 6.50 ms | 22.16 ms | 6.21 ms | 34.87 ms | 2.29x |
+| Q4_K | 1 | CUDA | 9.37 ms | 23.28 ms | 6.85 ms | 39.50 ms | 2.03x |
+| Q4_K | 3 | Vulkan | 9.72 ms | 30.69 ms | 5.79 ms | 46.20 ms | 1.73x |
+| Q4_K | 3 | CUDA | 19.31 ms | 28.47 ms | 7.31 ms | 55.09 ms | 1.45x |
+| F16 | 1 | Vulkan | 12.66 ms | 40.62 ms | 6.12 ms | 59.40 ms | 1.35x |
+| F16 | 1 | CUDA | 12.70 ms | 42.36 ms | 5.75 ms | 60.81 ms | 1.32x |
 
-The split shows what is happening. Timing one large graph against the small per
-step ones:
+CUDA used to be far behind, about 0.6x, for two reasons, and both are fixed:
 
-| Stage | Vulkan | CUDA |
-| --- | --- | --- |
-| Backbone prefill, one large graph | 118.0 ms | **31.7 ms** |
-| First vocoder, small graph | **58.1 ms** | 141.3 ms |
+- **CUDA graphs were never compiled in.** ggml leaves them off unless it is built
+  by llama.cpp, so `BREEZE_CUDA` now turns them on. The depth decoder replays one
+  fixed graph per frame, which took it from 55 ms to 23 ms. Set
+  `GGML_CUDA_DISABLE_GRAPHS=1` to compare.
+- **The CUDA `conv_transpose_1d` kernel is a per sample loop.** It cost about 1.6 s
+  on a 100 frame decode. The vocoder now upsamples with a matmul and overlap add,
+  which took it from 62 ms to 7 ms per frame on CUDA, and from 12 ms to 6 ms on
+  Vulkan.
 
-CUDA is nearly four times faster on the big graph and roughly half the speed on
-the small ones. Generation is thousands of small graphs, so Vulkan wins overall.
+The backbone is what still separates them, because it builds a new graph every
+frame and CUDA cannot replay that. Only the depth decoder gets the full benefit
+of graphs today.
 
-The cause is on our side, not CUDA's. Every step builds a brand new `ggml_cgraph`
-in a fresh context, so ggml cannot recognise it as the same graph and CUDA graph
-capture never pays off; disabling capture entirely only makes it slightly worse,
-which confirms it is doing very little. On top of that `ggml_backend_tensor_set`
-is a synchronous copy on CUDA, and we do several per graph.
-
-So CUDA is left off by default. If the runtime is ever reworked to reuse graphs
-across steps, this is the first thing worth re measuring, because the prefill
-number says the headroom is real.
+Tensor core speed, including an unlocked card, only reaches the large batched
+matmuls: backbone prefill and the vocoder. Depth and backbone decode multiply one
+or two rows at a time on a path that skips the tensor cores, and they are limited
+by reading the weights from memory. That is why a smaller depth type is the
+fastest option on either backend: F16 spends about 42 ms per frame in depth, and
+F16 with a Q4_K depth decoder spends about 25 ms.
 
 ## Outputs
 

@@ -46,15 +46,15 @@ cannot represent turns into `?`, so on those send non-ASCII text through the
 `--timings` reports where the time goes:
 
 ```
-time to first audio 364 ms over 7 flushes
+time to first audio 247 ms over 7 flushes
   reference encode       0.0 ms
-  prompt build          28.3 ms
-  backbone prefill     109.8 ms
-  first vocoder         51.8 ms  (4 frames)
-  backbone decode      941.8 ms  (8.12 ms/frame)
-  depth decode        4710.5 ms  (40.61 ms/frame)
-  vocoder             1316.7 ms  (11.35 ms/frame)
-  116 frames, 9.28 s audio
+  prompt build          38.3 ms
+  backbone prefill      25.1 ms
+  first vocoder         44.1 ms  (4 frames)
+  backbone decode      856.3 ms  (8.74 ms/frame)
+  depth decode        2279.4 ms  (23.26 ms/frame)
+  vocoder              525.2 ms  (5.36 ms/frame)
+  98 frames, 7.84 s audio
 ```
 
 The depth decoder dominates because it runs 15 sequential single token passes
@@ -63,7 +63,7 @@ the one before it picked. Everything else is small by comparison.
 
 Audio is flushed in growing chunks, starting at 4 frames so playback can begin
 early and growing to 25 frames so the vocoder stays efficient. That keeps time
-to first audio near 350 ms while generation as a whole runs comfortably faster
+to first audio near 250 ms while generation as a whole runs comfortably faster
 than realtime.
 
 `--chunk-first` and `--chunk-max` tune that ramp, and pairing them with
