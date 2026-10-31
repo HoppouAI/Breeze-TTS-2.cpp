@@ -18,7 +18,8 @@ running on [ggml](https://github.com/ggml-org/ggml). The Vulkan backend means it
 AMD and Intel GPUs, and it falls back to CPU. Ships a CLI, a streaming HTTP and WebSocket server with
 a web UI, and a plain C shared library for bindings.
 
-English and Mandarin, 24 kHz, roughly 1.8x realtime at Q8_0 on an RTX 3060, 1.6x with guidance.
+English and Mandarin, 24 kHz, roughly 2x realtime at Q8_0 on an RTX 3060, 1.6x with guidance, and the
+server can run a few streams at once.
 
 ## Demo
 
@@ -31,23 +32,50 @@ https://github.com/user-attachments/assets/b63e4664-497f-4bac-b9e2-50bf571df30a
 
 Recent versions borrow from [BreezeRT](https://breezeblue.ai/blog/breezert-ultra-low-latency-tts),
 the low latency runtime from the Breeze TTS 2 team: chunks that start small and grow, the depth
-decoder compiled into one graph per frame, and CUDA graph replay. On top of that, the vocoder now
-upsamples with a matmul, which is not from that post and turned out to be the biggest single win on
-CUDA. Its multi request scheduling and incremental vocoder decoding are not implemented here.
+decoder compiled into one graph per frame, CUDA graph replay, a vocoder that keeps its state and only
+decodes new frames, and several streams sharing one GPU batch. On top of that, the vocoder upsamples
+with a matmul, which is not from that post and was the biggest single win on CUDA.
 
-Real time factor on one RTX 3060 12 GB, with its tensor core limit unlocked, so a stock card may
-land a little lower on CUDA:
+Real time factor for one stream on one RTX 3060 12 GB, with its tensor core limit unlocked, v0.1.5 and
+the current code run back to back on the same seeds:
 
-| Model | `cfg_scale` | Backend | v0.1.3 | v0.1.4 |
-| --- | --- | --- | --- | --- |
-| Q4_K | 1 | Vulkan | 1.89x | 2.29x |
-| Q4_K | 3 | Vulkan | 1.52x | 1.73x |
-| Q4_K | 1 | CUDA | 0.60x | 2.03x |
-| Q4_K | 3 | CUDA | 0.64x | 1.45x |
+| Model | `cfg_scale` | v0.1.5 | Now |
+| --- | --- | --- | --- |
+| Q4_K | 1 | 2.15x | 2.41x |
+| Q4_K | 3 | 1.53x | 1.74x |
+| Q8_0 | 1 | 1.78x | 1.99x |
+| Q8_0 | 3 | 1.46x | 1.58x |
 
-Time to first audio on Vulkan, at Q8_0 with a Q4_K depth decoder, went from about 380 ms to about
-240 ms, or about 130 ms with `--chunk-first 1`. Vulkan stays the default, the reasons and the full
-per stage numbers are in [docs/build.md](docs/build.md).
+That is on Vulkan. CUDA at Q4_K measures 2.12x, and 1.70x at `cfg_scale` 3.
+
+Time to first audio on a warmed up server is about 80 ms, down from about 180 ms on v0.1.5.
+
+### Several streams at once
+
+Start the server with `--parallel 3` and it generates up to three streams together, sharing one GPU
+batch per frame. On the same card, with nothing buffered on the client and streams starting a second
+apart:
+
+| Streams | Model | Speed of each stream | Gaps |
+| --- | --- | --- | --- |
+| 3 | Q8_0 | 1.24x to 1.32x | none |
+| 3 | Q8_0 with a Q4_K depth decoder | 1.42x to 1.51x | none |
+| 3 | Q4_K on CUDA | 1.38x to 1.52x | none |
+| 1 with guidance, 2 without | Q8_0 | 1.15x to 1.28x | none |
+| 2 with guidance | Q8_0 | 1.16x to 1.19x | none |
+| 3 with guidance | Q8_0 | 0.87x to 0.95x | about 3 s, does not keep up |
+
+A stream using guidance counts as two, so `--parallel 4` fits any of these except the last one. When
+every slot is taken, the HTTP routes answer `409` and a WebSocket session waits its turn.
+
+### Tuning
+
+The defaults are the fastest settings measured, so most setups need nothing except `--parallel`.
+Which model to pick, how many streams a card can hold, what each setting does now and how to measure
+your own card are all in [docs/performance.md](docs/performance.md). One change to know about: if you
+raised `--chunk-max` on an older version, take it off, it no longer gains anything.
+
+Vulkan stays the default, the reasons and the per stage numbers are in [docs/build.md](docs/build.md).
 
 ## Documentation
 
@@ -63,6 +91,7 @@ per stage numbers are in [docs/build.md](docs/build.md).
 <a href="docs/voice-conversion.md"><img src="https://img.shields.io/badge/Voice_Conversion-6e2b3a?style=for-the-badge" alt="Voice conversion"></a>
 <a href="docs/c-api.md"><img src="https://img.shields.io/badge/C_API-2b3137?style=for-the-badge" alt="C API"></a>
 <a href="docs/ctypes.md"><img src="https://img.shields.io/badge/Python-2b3137?style=for-the-badge" alt="Python"></a>
+<a href="docs/performance.md"><img src="https://img.shields.io/badge/Performance-2b3137?style=for-the-badge" alt="Performance"></a>
 <a href="docs/architecture.md"><img src="https://img.shields.io/badge/Architecture-2b3137?style=for-the-badge" alt="Architecture"></a>
 
 </div>
@@ -106,7 +135,7 @@ Add `-DBREEZE_VULKAN=OFF` for a CPU only build. Outputs are `breeze-cli`, `breez
 ### Nix
 
 With [Nix](https://nixos.org/) (flake support on), `nix develop` gets you the build environment
-above — CMake, Ninja, the Vulkan SDK and the Python conversion deps — plus convenience commands.
+above: CMake, Ninja, the Vulkan SDK and the Python conversion deps, plus convenience commands.
 `nix develop .#cpu` is a CPU-only shell.
 
 ```
@@ -322,8 +351,9 @@ the only external dependency.
   and push harder toward the instruction. Past about 3 it turns harsh.
 - The vocoder comes from the bundled `audio_tokenizer/`, not the Mimi codec sitting in the main
   checkpoint. The reference never uses that one at inference time.
-- Streaming decodes in 2 second chunks with 72 frames of left context, which matches the vocoder
-  transformer's attention window, so chunks decode the same as they would in a single pass.
+- Streaming chunks start at 80 ms and grow to 2 seconds. The vocoder keeps its state between chunks and
+  only decodes new frames, and the result matches a single pass decode apart from rounding, about 40 dB
+  down on real speech.
 
 ## License
 

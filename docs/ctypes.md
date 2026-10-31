@@ -210,8 +210,10 @@ A context is not reentrant, so serialise calls with a lock. `breeze_generate`
 blocks and holds the GIL only while your callback runs, so other Python threads
 keep making progress during the compute.
 
-If you want real parallelism, run several `breeze-server` processes instead.
-Each extra context loads its own copy of the weights.
+If you want real parallelism, run one `breeze-server` with `--parallel`, which
+shares the weights and one GPU batch between streams, see
+[performance.md](performance.md#running-several-streams). Each extra context here
+loads its own copy of the weights.
 
 ## Other languages
 

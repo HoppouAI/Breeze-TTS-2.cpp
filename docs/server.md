@@ -24,7 +24,7 @@ changes and interruption. It is documented in [websocket.md](websocket.md).
 breeze-server <model.gguf> [--host H] [--port P] [--webui] [--cpu]
                            [--chunk-first N] [--chunk-max N] [--verbose]
                            [--voices-dir PATH] [--ws-port P] [--split-chars N]
-                           [--cors [ORIGINS]] [--no-warmup]
+                           [--cors [ORIGINS]] [--no-warmup] [--parallel N]
 ```
 
 | Flag | Default | Meaning |
@@ -33,7 +33,7 @@ breeze-server <model.gguf> [--host H] [--port P] [--webui] [--cpu]
 | `--port` | `8080` | TCP port. |
 | `--webui` | off | Also serve the browser UI at `/`. |
 | `--cpu` | off | Force the CPU backend instead of Vulkan. |
-| `--chunk-first` | `4` | Frames in the first streamed chunk. |
+| `--chunk-first` | `1` | Fewest frames in the first streamed chunk. It goes up on its own when the GPU is too busy to stay ahead with that few. |
 | `--chunk-max` | `25` | Frames the chunk ramps up to. |
 | `--verbose` | off | Add a per stage timing breakdown after each request. |
 | `--voices-dir` | `voices` | Folder of saved `.breeze` voices to load at startup. See [voices.md](voices.md). |
@@ -41,17 +41,19 @@ breeze-server <model.gguf> [--host H] [--port P] [--webui] [--cpu]
 | `--split-chars` | `600` | Default length long text is broken up at. `0` sends the whole thing through in one pass. A request can still override it. |
 | `--cors` | off | Let browser pages on other origins call the API. On its own it allows any origin; give a comma separated list to allow only those. See [Cross origin requests](#cross-origin-requests). |
 | `--no-warmup` | off | Skip the warm up at startup. See below. |
+| `--parallel` | `1` | Streams generating at once. A stream using guidance counts as two. See [performance.md](performance.md#running-several-streams). |
 
 ```
 breeze-server breeze-tts-2-q4_k.gguf --port 8137 --webui
 ```
 
-Before it starts listening the server runs a short throwaway generation, with
-and without guidance, and decodes a few sizes of audio chunk. That sets up the
-GPU pipelines the first real request would otherwise have to build, which on an
-RTX 3060 took that first request from around 640 ms to first audio down to
-around 300 ms, the same as every request after it. It adds about two seconds to
-startup. `--no-warmup` skips it.
+Before it starts listening the server runs a short throwaway generation for every
+mix of streams its `--parallel` setting allows, with and without guidance, and
+decodes a few sizes of audio chunk. That sets up the GPU pipelines the first real
+request would otherwise have to build. The first request after startup then reaches
+first audio in about 200 to 350 ms on an RTX 3060, and later ones in about 80 ms. It
+adds about 3 s to startup at `--parallel 1` and about 8 s at `--parallel 4`.
+`--no-warmup` skips it.
 
 ## Console output
 
@@ -70,6 +72,9 @@ stop, so the bar can reach 100% early or run past its estimate. The last line
 rewrites it with the real figure. `fps` is frames generated per second against
 12.5 frames of audio per second, so the trailing number is the real time factor
 and anything above `1.00x` is faster than playback.
+
+With `--parallel` above 1 the moving bar is left out, because several streams would
+write over each other. The final bar and the summary still print for each request.
 
 There is no authentication and no rate limiting, on either the HTTP port or the
 WebSocket one. Do not expose them directly to the internet; put them behind a
@@ -123,18 +128,20 @@ curl -s -o out.pcm -w "%{time_total}\n" \
 ```
 
 Audio seconds are `bytes / 2 / 24000`, so the factor is that divided by
-`time_total`. On an RTX 3060 a long clip measures about 2.2x at Q4_K and 1.8x
-at Q8_0 with the defaults. A busy GPU still eats into that.
+`time_total`. On an RTX 3060 a long clip measures about 2.4x at Q4_K and 2x at
+Q8_0 with the defaults. A busy GPU still eats into that, and so do other streams,
+see [performance.md](performance.md#running-several-streams).
 
 Guidance costs less than it looks like it should. `cfg_scale` above 1 adds a
 second forward pass, but the depth decoder batches both branches into one graph,
-so a 28 second passage at `cfg_scale` 3 measures 1.62x at Q4_K and 1.50x at
+so a 16 second passage at `cfg_scale` 3 measures 1.74x at Q4_K and 1.59x at
 Q8_0, still comfortably above realtime. Cloning also adds a one off
 reference encode of roughly 650 ms, which shows up in time to first audio rather
 than in the rate.
 
 If you land near or below 1.0, no client setting will fix it. Drop to a smaller
-quantisation, raise `--chunk-max`, or use a faster device. Quantising the depth
+quantisation, lower `--parallel`, or use a faster device. Raising `--chunk-max` no
+longer helps here. Quantising the depth
 decoder with `--depth` also helps, but it damages the high end and the damage
 grows over a long passage, so weigh it against the numbers in
 [models.md](models.md).
@@ -155,13 +162,13 @@ moment each chunk lands and keeps track of when that audio will run out. If
 waiting to fill the current chunk would leave the client with nothing to play,
 it sends the frames it already has early instead, and holds the chunk size until
 the cushion builds back up. It only does this when the short chunk plays for
-longer than it takes to generate and decode, because the vocoder re-decodes its
-context on every flush and a run of tiny chunks would fall further behind rather
-than catch up.
+longer than it takes to generate and decode, because otherwise a run of tiny
+chunks would fall further behind rather than catch up. The time it goes by includes
+any other streams sharing the GPU.
 
-Measured on an RTX 3060 at Q8_0 with a client that starts playing on the very
-first packet and buffers nothing, reading a 21 second passage at `cfg_scale` 3,
-the slowest common case:
+Measured on an RTX 3060 at Q8_0, when early flushing went in, with a client that
+starts playing on the very first packet and buffers nothing, reading a 21 second
+passage at `cfg_scale` 3, the slowest common case:
 
 | `--chunk-max` | Before | Early flushing | Plus the one graph depth decoder |
 | --- | --- | --- | --- |
@@ -171,7 +178,8 @@ the slowest common case:
 
 Without guidance there were no gaps in any of them. The early flushes cost a few
 percent of throughput under guidance, 1.17x against 1.22x at the default, and the
-faster depth decoder more than wins it back at 1.33x.
+faster depth decoder more than wins it back at 1.33x. The current build reads a 16
+second passage this way at 1.59x with no gaps.
 
 The old rule still gives the most margin: **buffer more audio than the slowest
 chunk takes to produce.** The bundled UI prebuffers 1.25 s. It just matters much
@@ -189,30 +197,30 @@ Audio is vocoded in chunks of whole frames at 12.5 frames per second. The first
 chunk sets how long the client waits for sound, so the chunk starts small and
 grows by a third each flush until it reaches `--chunk-max`.
 
-Every flush also re-decodes `sliding_window + 16` frames of left context and
-throws that audio away, so small chunks are expensive. At 25 frames the vocoder
-decodes 113 frames to emit 25. Raising the ceiling reclaims most of it, measured
-on an RTX 3060 at Q8_0 over a 27 second passage:
+The vocoder keeps its state between flushes and only decodes the new frames, so
+small chunks are cheap now and raising the ceiling no longer buys anything. Measured
+on an RTX 3060 at Q8_0 over an 18 second clip:
 
-| `--chunk-max` | Vocoder per frame | Total per frame | Real time factor |
-| --- | --- | --- | --- |
-| 25 | 6.09 ms | 42.91 ms | 1.86x |
-| 40 | 4.53 ms | 40.03 ms | 2.00x |
-| 60 | 3.91 ms | 39.51 ms | 2.02x |
+| `--chunk-max` | Flushes | Vocoder per frame |
+| --- | --- | --- |
+| 8 | 31 | 2.90 ms |
+| 25 | 15 | 2.17 ms |
+| 50 | 13 | 2.16 ms |
 
-Past about 40 the context is amortised and there is nothing left to win, while
-chunks keep getting slower to produce and demand a deeper client queue.
+Lowering it is the useful direction if a client wants a smaller buffer. Going to 8
+costs about 2% of total speed.
 
-Lower `--chunk-first` for a faster start. Four frames is about 320 ms of audio
-and lands near 240 ms on an RTX 3060 at Q8_0 with a Q4_K depth decoder; one frame
-gets there in roughly 130 ms but the chunks stay smaller for longer, which cost
-about 5% of throughput on a short clip.
+`--chunk-first` is a minimum, and the default of 1 frame is the fastest start. The
+server raises the first chunk by itself when the GPU is too busy for that. Setting 4
+took first audio from 278 ms to 394 ms in `breeze-cli` at Q8_0, and saved only 0.14 ms
+per frame.
 
 Setting both flags to the same value disables the ramp and streams a fixed size.
+[performance.md](performance.md#tuning-settings) has the rest.
 
 ### Summary
 
-- Aim for `--chunk-max 40` unless you are on a fast device and want a finer stream.
+- Leave `--chunk-max` at the default, or lower it if you want a smaller client buffer.
 - The server sends early when a client is about to run dry, so a small buffer is
   enough. Around 1 s still gives the most margin under guidance.
 - Prebuffer by fill level, not by delay.
@@ -297,12 +305,13 @@ long before generation finishes.
 | --- | --- | --- |
 | `400` | `{"error":"text is required"}` | `text` missing or empty. |
 | `404` | `{"error":"unknown voice_id"}` | No cached or saved voice by that name. |
-| `409` | `{"error":"busy"}` | Another generation is already running. |
+| `409` | `{"error":"busy"}` | Every generation slot is taken. |
 
-The server holds one model and serves one request at a time. A second
-concurrent request is rejected immediately with `409` rather than queued, so
-clients should retry with backoff or run several servers behind a load
-balancer. The WebSocket endpoint queues instead of refusing, which is one reason
+The server holds one model and by default serves one request at a time. `--parallel`
+raises that, and a request using guidance takes two slots, see
+[performance.md](performance.md#running-several-streams). A request that does not
+fit is rejected immediately with `409` rather than queued, so clients should retry
+with backoff. The WebSocket endpoint queues instead of refusing, which is one reason
 to prefer it for anything conversational.
 
 Because the response is streamed, a failure that happens **after** the first
@@ -458,7 +467,7 @@ instead of a bare status code.
 | --- | --- |
 | `400` | The body is not a JSON object, `input` is missing, or a field has the wrong type or an unknown value. |
 | `404` | `voice` is not a saved or cached voice. |
-| `409` | Another generation is already running. The OpenAI SDKs retry this on their own. |
+| `409` | Every generation slot is taken. The OpenAI SDKs retry this on their own. |
 
 The `Authorization` header is ignored, so any API key works. That also means
 there is still no authentication, see the warning above.

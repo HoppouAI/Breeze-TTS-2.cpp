@@ -9,6 +9,7 @@
 | [websocket.md](websocket.md) | Streaming sessions, incremental text, live direction changes, interruption |
 | [voices.md](voices.md) | Caching and saving reference voices, the `.breeze` format |
 | [voice-conversion.md](voice-conversion.md) | Respeaking a recording in another voice, `breeze-convert` |
+| [performance.md](performance.md) | What's new, picking a model, running several streams, tuning and measuring |
 | [c-api.md](c-api.md) | The `breeze.h` C API, lifecycle, callbacks, thread safety |
 | [ctypes.md](ctypes.md) | Binding the shared library from Python with `ctypes` |
 | [architecture.md](architecture.md) | The four model stages and how the C++ mirrors the reference |

@@ -122,7 +122,7 @@ $$\text{logits} = \text{uncond} + s \cdot (\text{cond} - \text{uncond})$$
 
 The depth decoder runs both branches in **one graph**, not two. Each weight is
 read once for both branches, so the second one costs about 40% rather than a
-doubling: 23.2 ms per frame at `cfg_scale` 1 against 31.8 ms at 3.
+doubling: 23.5 ms per frame at `cfg_scale` 1 against 32.3 ms at 3.
 
 The two branches share one KV cache, interleaved as
 `slot = pos * n_branch + branch`. That keeps the tokens written each step
@@ -130,46 +130,72 @@ contiguous, so the cache append is a single copy, and
 `build_branch_causal_mask` makes each query causal within its own branch and
 blind to the other.
 
-The backbone still runs its branches separately, because the conditioned and
-unconditioned prompts have different lengths and do not interleave cleanly. That
-is the remaining cost of guidance, worth about 4 ms per frame.
+The backbone runs its branches as rows of one batch. The conditioned and
+unconditioned prompts have different lengths and do not interleave cleanly, so
+each row keeps its own cache, positions and mask. That is the remaining cost of
+guidance, worth about 4 ms per frame.
 
 Measured end to end for voice design on an RTX 3060, Q8_0 with a Q4_K depth
 decoder:
 
 | `cfg_scale` | Backbone | Depth | Vocoder | Total per frame | Real time factor |
 | --- | --- | --- | --- | --- | --- |
-| 1 | 8.5 ms | 23.2 ms | 5.3 ms | 37.0 ms | 2.16x |
-| 3 | 11.9 ms | 31.8 ms | 6.1 ms | 49.8 ms | 1.61x |
+| 1 | 8.83 ms | 23.46 ms | 2.22 ms | 34.51 ms | 2.32x |
+| 3 | 12.65 ms | 32.30 ms | 2.42 ms | 47.37 ms | 1.69x |
 
 Cloning adds a one off reference encode of roughly 650 ms, which lands on time to
 first audio and not on throughput.
 
 ## Streaming
 
-Audio is flushed in growing chunks. The first is 4 frames (320 ms) so playback
-can start early, and each flush grows by a third up to 25 frames (2 s) by
-default, which keeps the vocoder running on batches big enough to amortise its
-fixed cost. On an RTX 3060, Q8_0 with a Q4_K depth decoder, that puts time to first audio
-around 230 ms against roughly 920 ms for a fixed 25 frame chunk. Both ends of the ramp are
-configurable, see [server.md](server.md).
+Audio is flushed in growing chunks. The first is as small as the GPU can stay ahead
+with, usually 1 frame (80 ms), and each flush grows by a third up to 25 frames (2 s)
+by default. On an RTX 3060 at Q4_K a warmed up server reaches first audio in about
+80 ms. Both ends of the ramp are configurable, see [performance.md](performance.md).
 
-Each flush decodes with `sliding_window + 16` frames of left context and
-discards the audio belonging to that context. The transformer window alone is
-not enough: the convolutions either side of it reach back about another 16
-frames, and truncating there costs about 8 dB against a single pass decode.
+The vocoder keeps its state between flushes in `VocoderStream`, so a flush only
+decodes the new frames. The state is held in persistent GPU tensors: the history of
+every causal and depthwise convolution, the overlap tail of every transposed
+convolution, and the transformer's keys and values for its attention window. Each
+tensor is read through a concat and written back with a copy inside the same graph.
+A one shot decode goes through a throwaway stream, and since a cleared state equals
+the zero padding it used before, its output did not change.
 
-That context is re-decoded every flush, so the chunk size sets how much vocoder
-work is thrown away. A 25 frame chunk decodes 113 frames to emit 25, at about
-6 ms per emitted frame on a long clip. Going to 40 frames takes that to 4.5 ms,
-which is worth about 7% off total generation time, and 60 frames adds very little
-more.
+A flush costs about 8.5 ms plus 1.1 ms per frame on Vulkan: 9.1 ms for 1 frame, 17.7
+ms for 8 and 40 ms for 25. Chunked output matches a one shot decode apart from
+rounding, because `ggml_conv_1d` rounds through F16 and GPU matmuls round too. It is
+about 40 dB down on real speech. With F32 convolutions on the CPU every flush pattern
+matched to 106 dB, which is what shows the state itself is right.
 
 Chunking also shapes what the client has to do. The queue drains continuously but
 refills once per chunk, so a client needs to hold more audio than a chunk takes
-to produce, not merely delay its first chunk. Producing 40 frames takes about
-2 s, so a client sitting on 0.5 s runs dry even when the average rate is well
-ahead of playback.
+to produce, not merely delay its first chunk. Producing 25 frames takes about
+1 s, so a client sitting on 0.5 s can run dry even when the average rate is well
+ahead of playback. The server sends early to cover most of this, see
+[server.md](server.md#queue-depth).
+
+## Several streams
+
+`GenScheduler` runs all GPU work on one thread. With `--parallel` above 1 it steps
+every active `SpeechJob` by one frame at a time through `step_jobs`:
+
+- **Depth decoder.** One fused graph for the whole batch, cached by the number of plain
+  streams, the number of guided streams and top k. Plain streams take one row each and
+  guided streams take two. Each stream keeps its own random numbers, guidance scale
+  and temperature, so requests with different settings can share a batch.
+- **Backbone.** One batch with a row per branch, each with its own cache, positions
+  and mask, since the streams are at different lengths.
+- **Vocoder.** Runs per stream, on its own `VocoderStream`, when that stream's chunk
+  fills.
+
+Sharing a batch reads each weight once for every row, which is why three streams cost
+far less than three times one. Audio callbacks run on the request's own thread through
+a queue, so a slow client only holds up itself. Other GPU work, like encoding a
+reference voice, runs between frames.
+
+Slots are counted, not streams, and a guided stream costs two. A new request's prompt
+and prefill wait up to 400 ms while a paced stream has under 250 ms of audio left. The
+first chunk is sized from how long frames have recently taken at that number of rows.
 
 ## Where the time goes
 
@@ -178,9 +204,9 @@ Measured on an RTX 3060 at Q8_0 with a Q4_K depth decoder, per frame of audio
 
 | Stage | Per frame | Share |
 | --- | --- | --- |
-| Backbone decode | 8.5 ms | 23% |
-| Depth decode | 23.2 ms | 63% |
-| Vocoder | 5.3 ms | 14% |
+| Backbone decode | 8.83 ms | 26% |
+| Depth decode | 23.46 ms | 68% |
+| Vocoder | 2.22 ms | 6% |
 
 The depth decoder dominates because it runs 15 sequential steps per frame, one
 per codebook, and each step is a full 12 layer forward pass over a single token.
@@ -231,7 +257,8 @@ between them, matching the reference's `transpose(1, 2)` and `permute(0, 2, 1)`.
 | `src/codec.cpp` | Vocoder entry points |
 | `src/codec_conv.cpp` | Causal convolution helpers and the SEANet encoder |
 | `src/codec_transformer.cpp` | Mimi encoder transformer and vocoder transformer |
-| `src/codec_decoder.cpp` | Quantizer decode, ConvNeXt, SnakeBeta, decoder blocks |
+| `src/codec_decoder.cpp` | Quantizer decode, ConvNeXt, SnakeBeta, decoder blocks, the stateful `VocoderStream` |
 | `src/sampling.cpp` | Repetition penalty, temperature, top-k, top-p |
-| `src/generation.cpp` | Prompt assembly, generation loop, chunked flush |
+| `src/generation.cpp` | Prompt assembly, `SpeechJob`, batched frame steps, chunked flush |
+| `src/scheduler.cpp` | `GenScheduler`: the GPU thread, slots, warm up |
 | `src/c_api.cpp` | C ABI wrapper |

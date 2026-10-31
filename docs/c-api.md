@@ -131,8 +131,9 @@ int breeze_generate(breeze_context * ctx, const breeze_request * req,
 Runs the full pipeline and streams audio to `cb` as it is produced. Returns `0`
 on success, non zero on failure.
 
-The call blocks until generation finishes. Audio arrives in chunks of 25 frames
-(2 seconds) except for the final chunk, which holds whatever is left.
+The call blocks until generation finishes. Audio arrives in chunks that start at 1
+frame (80 ms) and grow to 25 frames (2 seconds), except for the final chunk, which
+holds whatever is left.
 
 ### `breeze_generate_wav`
 

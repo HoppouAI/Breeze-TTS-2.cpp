@@ -57,18 +57,20 @@ cmake --build build-cpu -j
 
 ### Vulkan or CUDA
 
-Vulkan stays the default. It is a little ahead at Q4_K and Q8_0, level at F16, and
-it needs no toolkit. Measured on an RTX 3060 12 GB with its tensor core limit
-unlocked, per frame of audio (80 ms):
+Vulkan stays the default. It is a little ahead at Q4_K, level at F16, and it needs no
+toolkit. Measured on an RTX 3060 12 GB with its tensor core limit unlocked, per frame of
+audio (80 ms). The Q4_K and Q8_0 rows are averages over 4 seeds:
 
 | Model | `cfg_scale` | Backend | Backbone | Depth | Vocoder | Total per frame | Real time factor |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Q4_K | 1 | Vulkan | 6.50 ms | 22.16 ms | 6.21 ms | 34.87 ms | 2.29x |
-| Q4_K | 1 | CUDA | 9.37 ms | 23.28 ms | 6.85 ms | 39.50 ms | 2.03x |
-| Q4_K | 3 | Vulkan | 9.72 ms | 30.69 ms | 5.79 ms | 46.20 ms | 1.73x |
-| Q4_K | 3 | CUDA | 19.31 ms | 28.47 ms | 7.31 ms | 55.09 ms | 1.45x |
-| F16 | 1 | Vulkan | 12.66 ms | 40.62 ms | 6.12 ms | 59.40 ms | 1.35x |
-| F16 | 1 | CUDA | 12.70 ms | 42.36 ms | 5.75 ms | 60.81 ms | 1.32x |
+| Q4_K | 1 | Vulkan | 7.12 ms | 23.66 ms | 2.38 ms | 33.16 ms | 2.41x |
+| Q4_K | 1 | CUDA | 10.23 ms | 24.20 ms | 3.37 ms | 37.80 ms | 2.12x |
+| Q4_K | 3 | Vulkan | 10.91 ms | 32.65 ms | 2.42 ms | 45.98 ms | 1.74x |
+| Q4_K | 3 | CUDA | 16.44 ms | 27.33 ms | 3.41 ms | 47.18 ms | 1.70x |
+| Q8_0 | 1 | Vulkan | 9.06 ms | 28.83 ms | 2.39 ms | 40.28 ms | 1.99x |
+| Q8_0 | 3 | Vulkan | 13.07 ms | 35.10 ms | 2.56 ms | 50.74 ms | 1.58x |
+| F16 | 1 | Vulkan | 13.06 ms | 40.95 ms | 2.41 ms | 56.42 ms | 1.42x |
+| F16 | 1 | CUDA | 12.86 ms | 42.12 ms | 3.03 ms | 58.01 ms | 1.38x |
 
 CUDA used to be far behind, about 0.6x, for two reasons, and both are fixed:
 
@@ -79,7 +81,7 @@ CUDA used to be far behind, about 0.6x, for two reasons, and both are fixed:
 - **The CUDA `conv_transpose_1d` kernel is a per sample loop.** It cost about 1.6 s
   on a 100 frame decode. The vocoder now upsamples with a matmul and overlap add,
   which took it from 62 ms to 7 ms per frame on CUDA, and from 12 ms to 6 ms on
-  Vulkan.
+  Vulkan. Keeping its state between flushes then took those to about 3.5 ms and 2.3 ms.
 
 The backbone is what still separates them, because it builds a new graph every
 frame and CUDA cannot replay that. Only the depth decoder gets the full benefit
@@ -91,6 +93,9 @@ or two rows at a time on a path that skips the tensor cores, and they are limite
 by reading the weights from memory. That is why a smaller depth type is the
 fastest option on either backend: F16 spends about 42 ms per frame in depth, and
 F16 with a Q4_K depth decoder spends about 25 ms.
+
+Choosing a model, running several streams and tuning are in
+[performance.md](performance.md).
 
 ## Outputs
 

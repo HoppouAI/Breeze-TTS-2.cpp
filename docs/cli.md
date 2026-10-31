@@ -26,7 +26,7 @@ breeze-cli <model.gguf> --text <text> [options]
 | `--max-new <n>` | model default (750) | Frame cap. One frame is 80 ms. |
 | `--split-chars <n>` | `600` | Split long text into pieces of about this many characters. `0` generates in one pass. |
 | `--output <wav>` | `output.wav` | Output path. |
-| `--chunk-first <n>` | `4` | Frames in the first streamed chunk. |
+| `--chunk-first <n>` | `1` | Frames in the first streamed chunk. |
 | `--chunk-max <n>` | `25` | Frames the chunk ramps up to. |
 | `--timings` | off | Print a stage by stage latency breakdown. |
 | `--cpu` | off | Force the CPU backend. |
@@ -46,32 +46,31 @@ cannot represent turns into `?`, so on those send non-ASCII text through the
 `--timings` reports where the time goes:
 
 ```
-time to first audio 247 ms over 7 flushes
+time to first audio 190 ms over 9 flushes
   reference encode       0.0 ms
-  prompt build          38.3 ms
-  backbone prefill      25.1 ms
-  first vocoder         44.1 ms  (4 frames)
-  backbone decode      856.3 ms  (8.74 ms/frame)
-  depth decode        2279.4 ms  (23.26 ms/frame)
-  vocoder              525.2 ms  (5.36 ms/frame)
-  98 frames, 7.84 s audio
+  prompt build          42.0 ms
+  backbone prefill      39.5 ms
+  first vocoder         45.9 ms  (1 frames)
+  backbone decode      712.3 ms  (9.37 ms/frame)
+  depth decode        1924.3 ms  (25.32 ms/frame)
+  vocoder              279.0 ms  (3.67 ms/frame)
+  76 frames, 6.08 s audio
 ```
 
 The depth decoder dominates because it runs 15 sequential single token passes
 per frame. They go to the GPU as one graph, but each pass still waits on the code
 the one before it picked. Everything else is small by comparison.
 
-Audio is flushed in growing chunks, starting at 4 frames so playback can begin
-early and growing to 25 frames so the vocoder stays efficient. That keeps time
-to first audio near 250 ms while generation as a whole runs comfortably faster
-than realtime.
+Audio is flushed in growing chunks, starting at 1 frame so playback can begin
+early and growing to 25 frames. The vocoder keeps its state between flushes and only
+decodes new frames, so small chunks cost very little.
 
-`--chunk-first` and `--chunk-max` tune that ramp, and pairing them with
-`--timings` is the easiest way to find good values for a given device before
-passing the same numbers to `breeze-server`. Raising `--chunk-max` mostly buys
-back vocoder time, since every flush re-decodes a fixed window of left context
-that gets discarded. See [server.md](server.md) for the measurements and for
-what the client has to do with the result.
+`--chunk-first` and `--chunk-max` tune that ramp, and pairing them with `--timings`
+shows the effect on a given device. The defaults are the fastest settings measured,
+and raising `--chunk-max` no longer gains anything. The GPU driver builds its
+pipelines on the first run, so run twice and go by the second one. See
+[performance.md](performance.md) for the measurements, and [server.md](server.md)
+for what a client has to do with the result.
 
 ## Recipes
 
