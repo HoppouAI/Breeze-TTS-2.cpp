@@ -2,6 +2,8 @@
 
 #include "breeze/audio.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -67,36 +69,35 @@ public:
     }
 
     bool init(int sr) {
+        // chrome and edge reject shine's mpeg-2 frames as malformed, so stay at mpeg-1 rates
+        m_up = 1;
+        while (sr * m_up < 32000) m_up++;
+        m_rate = sr * m_up;
+        build_filter();
         shine_config_t cfg;
         cfg.wave.channels = PCM_MONO;
-        cfg.wave.samplerate = sr;
+        cfg.wave.samplerate = m_rate;
         shine_set_config_mpeg_defaults(&cfg.mpeg);
         cfg.mpeg.mode = MONO;
-        cfg.mpeg.bitr = 64;
-        if (shine_check_config(sr, cfg.mpeg.bitr) < 0) return false;
+        cfg.mpeg.bitr = BITRATE;
+        if (shine_check_config(m_rate, cfg.mpeg.bitr) < 0) return false;
         m_enc = shine_initialise(&cfg);
         if (!m_enc) return false;
         m_pass = shine_samples_per_pass(m_enc);
         return true;
     }
 
+    int sample_rate(int) const override { return m_rate; }
+
     void write(const float * s, int n, std::string & out) override {
-        for (int i = 0; i < n; i++) {
-            float v = s[i];
-            if (v > 1.0f) v = 1.0f;
-            if (v < -1.0f) v = -1.0f;
-            // shine decodes 9/8 louder than it was fed at every rate, so loud peaks would clip
-            m_buf.push_back((int16_t) (v * 32767.0f * (8.0f / 9.0f)));
-        }
-        size_t at = 0;
-        while (m_buf.size() - at >= (size_t) m_pass) {
-            encode(m_buf.data() + at, out);
-            at += (size_t) m_pass;
-        }
-        m_buf.erase(m_buf.begin(), m_buf.begin() + (std::ptrdiff_t) at);
+        for (int i = 0; i < n; i++) push(s[i]);
+        drain(out);
     }
 
     void finish(std::string & out) override {
+        // the filter still holds the end of the clip
+        for (int i = 0; i < TAPS / 2; i++) push(0.0f);
+        drain(out);
         if (!m_buf.empty()) {
             m_buf.resize((size_t) m_pass, 0);
             encode(m_buf.data(), out);
@@ -108,6 +109,50 @@ public:
     }
 
 private:
+    static constexpr int TAPS = 32;
+    static constexpr int BITRATE = 80;
+
+    // windowed sinc per output phase, phase 0 is the input sample itself
+    void build_filter() {
+        const double pi = 3.14159265358979323846;
+        m_fir.resize((size_t) m_up * TAPS);
+        m_hist.assign(TAPS, 0.0f);
+        for (int p = 0; p < m_up; p++) {
+            double sum = 0.0;
+            for (int k = 0; k < TAPS; k++) {
+                const double x = k - (TAPS / 2 - 1) - (double) p / m_up;
+                const double u = x / (TAPS / 2);
+                const double win = 0.42 + 0.5 * std::cos(pi * u) + 0.08 * std::cos(2.0 * pi * u);
+                const double h = (x == 0.0 ? 1.0 : std::sin(pi * x) / (pi * x)) * win;
+                m_fir[(size_t) p * TAPS + k] = (float) h;
+                sum += h;
+            }
+            for (int k = 0; k < TAPS; k++) m_fir[(size_t) p * TAPS + k] /= (float) sum;
+        }
+    }
+
+    void push(float in) {
+        std::copy(m_hist.begin() + 1, m_hist.end(), m_hist.begin());
+        m_hist[TAPS - 1] = std::max(-1.0f, std::min(1.0f, in));
+        for (int p = 0; p < m_up; p++) {
+            const float * h = &m_fir[(size_t) p * TAPS];
+            float v = 0.0f;
+            for (int k = 0; k < TAPS; k++) v += h[k] * m_hist[k];
+            // shine decodes 9/8 louder than it was fed at every rate, so loud peaks would clip
+            v = std::max(-1.0f, std::min(1.0f, v * (8.0f / 9.0f)));
+            m_buf.push_back((int16_t) (v * 32767.0f));
+        }
+    }
+
+    void drain(std::string & out) {
+        size_t at = 0;
+        while (m_buf.size() - at >= (size_t) m_pass) {
+            encode(m_buf.data() + at, out);
+            at += (size_t) m_pass;
+        }
+        m_buf.erase(m_buf.begin(), m_buf.begin() + (std::ptrdiff_t) at);
+    }
+
     void encode(int16_t * pcm, std::string & out) {
         int written = 0;
         const unsigned char * data = shine_encode_buffer_interleaved(m_enc, pcm, &written);
@@ -116,6 +161,10 @@ private:
 
     shine_t m_enc = nullptr;
     int m_pass = 0;
+    int m_up = 1;
+    int m_rate = 0;
+    std::vector<float> m_fir;
+    std::vector<float> m_hist;
     std::vector<int16_t> m_buf;
 };
 #endif

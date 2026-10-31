@@ -413,7 +413,7 @@ work like any other.
 
 | `response_format` | Sent as | `Content-Type` |
 | --- | --- | --- |
-| `mp3` | MP3, 64 kbps mono at 24 kHz | `audio/mpeg` |
+| `mp3` | MP3, 80 kbps mono at 48 kHz | `audio/mpeg` |
 | `wav` | 16 bit mono WAV at 24 kHz | `audio/wav` |
 | `pcm` | Headerless s16le mono at 24 kHz, the same as the native endpoint and OpenAI's own `pcm` | `audio/pcm` |
 | `opus`, `aac`, `flac` | WAV | `audio/wav` |
@@ -424,7 +424,9 @@ because the length is not known yet. Browsers and ffmpeg read that to the end
 of the stream.
 
 MP3 is encoded with [shine](https://github.com/toots/shine), which builds from
-the `third_party/shine` submodule. A build without it, or one configured with
+the `third_party/shine` submodule. It is upsampled to 48 kHz first, because Chrome
+and Edge reject the frames shine writes at 24 kHz, so `X-Sample-Rate` says 48000
+on an MP3 response. A build without it, or one configured with
 `-DBREEZE_MP3=OFF`, sends WAV when asked for `mp3` as well. The console line for
 each request says what actually went out, for example `openai wav for opus`.
 

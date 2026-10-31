@@ -173,7 +173,7 @@ int run_server(const ServerOptions & opts) {
         std::string sent, ctype;
         std::shared_ptr<AudioEncoder> enc = make_encoder(o.format, sr, sent, ctype);
 
-        res.set_header("X-Sample-Rate", std::to_string(sr));
+        res.set_header("X-Sample-Rate", std::to_string(enc->sample_rate(sr)));
         res.set_header("Cache-Control", "no-store");
         if (o.sse) ctype = "text/event-stream";
 

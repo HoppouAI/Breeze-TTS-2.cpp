@@ -12,6 +12,8 @@ public:
     virtual void begin(std::string & out) { (void) out; }
     virtual void write(const float * s, int n, std::string & out) = 0;
     virtual void finish(std::string & out) { (void) out; }
+    // the rate the bytes are really at, which an encoder is free to change
+    virtual int sample_rate(int in) const { return in; }
 };
 
 // sent is the format really produced, anything we cant encode comes back as wav
