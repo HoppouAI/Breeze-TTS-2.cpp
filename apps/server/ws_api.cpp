@@ -109,8 +109,15 @@ static void speaker(WsConn & conn, Session & s, std::mutex & gpu) {
         {
             std::unique_lock<std::mutex> lock(s.mu);
             s.speaking = false;
-            s.cv.wait(lock, [&] { return s.quit || !s.queue.empty(); });
+            s.cv.wait(lock, [&] { return s.quit || !s.queue.empty() || s.ending; });
             if (s.quit) return;
+            if (s.queue.empty()) {
+                // `end` arrived with nothing left to speak, so the speaker owns the terminal event
+                s.ending = false;
+                lock.unlock();
+                event(conn, "done");
+                continue;
+            }
             piece = std::move(s.queue.front());
             s.queue.pop_front();
             s.speaking = true;
