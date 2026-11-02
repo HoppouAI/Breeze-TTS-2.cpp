@@ -19,9 +19,7 @@ bool GGUFModel::load(const std::string & path, Backend & be, Backend * cpu_be, c
     gguf = gguf_init_from_file(path.c_str(), gp);
     if (!gguf) return false;
 
-    // Tensors for the CPU get twins in their own context, allocated in a CPU
-    // buffer; the originals then point at the twins' memory, so the GPU
-    // allocation below skips them (it only allocates tensors without data).
+    // pointing the originals at cpu twins makes the gpu alloc below skip them, it only takes tensors with no data
     if (cpu_be && cpu_be->backend && cpu_prefix) {
         const size_t plen = strlen(cpu_prefix);
         const int64_t nt = gguf_get_n_tensors(gguf);

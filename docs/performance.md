@@ -51,6 +51,8 @@ seeds. All of the gain is in the vocoder, the backbone and depth decoder did not
 5. **Leave the warm up on.** It costs a few seconds at startup and saves that time on
    the requests your users are waiting for.
 6. **Do not judge the first run.** See [The first run is slower](#the-first-run-is-slower).
+7. **Out of video memory?** `--te-cpu` saves about 1 GB, but not together with
+   `--parallel`. See [Short on video memory](#short-on-video-memory).
 
 ## Picking a model
 
@@ -134,6 +136,48 @@ voice runs between frames, so every stream waits for that encode, about 650 ms.
 numbers, but GPU rounding differs slightly with the batch size and that can change what
 gets sampled. The speech is just as good, it just is not the same take. If you need
 exactly repeatable output, use `--parallel 1` and generate one request at a time.
+
+## Short on video memory
+
+`--te-cpu` keeps the text encoder's weights in system memory and runs it on the CPU.
+The backbone, depth decoder and vocoder stay on the GPU. The text encoder only reads
+the text before any audio comes out, so it is the one part that can leave the GPU
+without making the stream itself slower. It is meant for 4 to 6 GB cards, or for
+sharing a card with something like a local LLM. On a card with room to spare, leave
+it off.
+
+`BREEZE_TE_THREADS` sets how many CPU threads it uses, by default half your cores. The
+C API and the Python bindings have no flag for it, set `BREEZE_TE_CPU=1` in the
+environment instead.
+
+One stream at Q8_0 on the RTX 3060, 6 threads, a passage split into two pieces. The
+video memory is what the model used, with other programs taken off:
+
+| `cfg_scale` | Text encoder | Video memory | Encoding, both pieces | First audio |
+| --- | --- | --- | --- | --- |
+| 1 | GPU | 3.7 to 3.9 GB | 0.1 s | 0.3 to 0.4 s |
+| 1 | CPU | 2.7 GB | 1.5 s | 0.5 s |
+| 3 | GPU | 4.0 GB | 0.1 s | 0.3 s |
+| 3 | CPU | 2.8 to 2.9 GB | 2.4 to 2.7 s | 0.8 to 1.0 s |
+
+So it saves about 1 GB at Q8_0, and about 0.9 GB at Q4_K. Once audio is coming out the
+speed is the same as without it. What it costs is time before audio:
+
+- **Every piece pays for it.** Long text is split into pieces, see
+  [`--split-chars`](#--split-chars), and each one is encoded when it starts. That is
+  about 0.7 s per piece, and about 1.3 s with guidance, because guidance encodes the
+  text twice. The first piece adds it to the wait for first audio. Later pieces start
+  while one stream is normally well ahead of playback, so the pause is usually covered
+  by audio the client already has.
+- **The same seed gives slightly different audio.** The CPU rounds a little
+  differently, so the clip changes but the voice does not.
+
+**Do not combine it with `--parallel`.** The server encodes text on the same thread that
+generates every stream, so while it encodes, all the other streams stop. With
+`--te-cpu` every new request and every new piece of a long text would stop the others
+for 0.7 to 1.3 s. Streams sharing the GPU only run about 1.1 to 1.3x faster than
+playback, so they cannot make that up and you would hear gaps. This combination has not
+been measured, so if you have to use both, test it with your own clients first.
 
 ## Tuning settings
 
@@ -257,4 +301,5 @@ the server idle.
 | Gaps only when requests start together | The burst case above | Buffer about 1 s, or space out the requests |
 | Slow first request, fine after that | Pipelines being built | Leave the warm up on, see above |
 | `409` from the HTTP routes | Every slot is taken | Raise `--parallel`, retry, or use the WebSocket, which waits |
+| Gaps whenever a request or a new piece starts, with `--te-cpu` | The CPU text encoder pauses the other streams | Use `--te-cpu` only at `--parallel 1` |
 | A run much slower than the last one | Other programs on the GPU | Check GPU load and run it again |

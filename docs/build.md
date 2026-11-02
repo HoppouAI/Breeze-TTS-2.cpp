@@ -160,7 +160,9 @@ needs roughly 3 GB of VRAM against about 7 GB for F16. See
 If that is still too much, for instance next to a local LLM on a 6 GB card,
 `--te-cpu` (or `BREEZE_TE_CPU=1` for the C API and the Python bindings) keeps
 the T5Gemma2 text encoder in system memory and runs it on the CPU. It runs
-once per prompt, so the cost is a short delay before the first audio rather
-than a slower stream. On an RTX 2060 with Q4_K and a Q2_K depth decoder,
-peak video memory went from 2725 MB to 1811 MB and the first audio from about
-0.2 s to 0.75 s (the encoder took about 0.5 s on 6 threads).
+once per piece of text, so the cost is a delay before each piece rather than a
+slower stream. On an RTX 2060 with Q4_K and a Q2_K depth decoder, peak video
+memory went from 2725 MB to 1811 MB and the first audio from about 0.2 s to
+0.75 s (the encoder took about 0.5 s on 6 threads). Do not combine it with
+`--parallel`, every encode pauses the other streams. The numbers on a 3060 and
+the details are in [performance.md](performance.md#short-on-video-memory).

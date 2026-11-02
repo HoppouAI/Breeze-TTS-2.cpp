@@ -26,8 +26,9 @@ int main(int argc, char ** argv) {
         printf("  --cors         let browser pages on other origins call the api. on its own it allows\n");
         printf("                 any origin, or give a comma separated list like\n");
         printf("                 http://localhost:5173,https://app.example.com to allow only those\n");
-        printf("  --te-cpu       run the text encoder on the cpu, saving about 0.9 gb of video memory\n");
-        printf("                 for about half a second more before the first audio\n");
+        printf("  --te-cpu       run the text encoder on the cpu, saving about 1 gb of video memory for\n");
+        printf("                 about 0.7 s more before each piece of text. dont use it with --parallel,\n");
+        printf("                 it pauses the other streams\n");
         printf("  --parallel N   streams generating at once (default 1), more than that get told the\n");
         printf("                 server is busy. a stream using cfg counts as two\n");
         printf("  --no-warmup    skip the short throwaway generation at startup, the first request\n");
