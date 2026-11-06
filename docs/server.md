@@ -599,8 +599,14 @@ Everything is set in the page under Settings and kept in the browser:
   keep replies short and casual, use "..." for pauses, and allow vocal event tags
   like `(laugh)` or `(sigh)` so the voice can actually laugh.
 - **Turn taking.** How long to wait before replying, whether you can interrupt
-  and how easily, and backchannels. Backchannels are generated once per call
-  in the character's saved voice, so they need one.
+  and how easily, and backchannels. tyger's own interrupt score misses short
+  ones like "wait, hold on", so talking over the character for about a second
+  stops it too. When an interruption turns out to be just "mm-hmm" or nothing
+  at all, the character picks up where it stopped. Backchannels are short
+  phrases made once per call in the character's voice; with no saved voice
+  they start after the first reply, cloned from it. They can also be written
+  by the chat model from what you are saying, which fits better but takes
+  about a second each.
 - **Voice.** Guidance and temperature for the speech model.
 - **Conversation.** Which chat model, temperature, reply length, an API key for
   hosted servers, and whether to skip the thinking step on reasoning models.
