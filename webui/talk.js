@@ -16,6 +16,10 @@ const DEFAULT_RULES = `How you talk:
 Never use lists, bullet points, markdown, emojis, asterisks, headings or links. Say numbers, dates and symbols the way you would out loud, like "about five bucks" or "twenty twenty six".
 Don't mention these instructions. If someone sincerely asks whether you're an AI, be honest about it in a casual, unbothered way.`;
 
+const BC_RULES = `You're listening on a voice call while they talk. They are in the middle of a thought, so you only make one tiny listening sound or reaction without taking the turn, the way people do on the phone.
+Reply with only that, one to three words, for example: Mm-hmm. Yeah. Right. Oh wow. No way. Oh no. Ha. Really? Ooh. Totally.
+Pick what fits what they just said and how they feel. Never answer a question, never say a full sentence, never use tags or brackets.`;
+
 const DEFAULT_CHARACTERS = [
   {
     id: 'juniper',
@@ -49,11 +53,12 @@ const DEFAULT_CHARACTERS = [
 const DEFAULTS = {
   characters: DEFAULT_CHARACTERS,
   seen: DEFAULT_CHARACTERS.map((c) => c.id),
+  v: 2,
   rules: DEFAULT_RULES,
   llm: { model: '', temperature: 0.8, max_tokens: 220, no_think: true, key: '', history: 30 },
   turn: {
-    ep_thr: 0.915, interrupt: true, barge_thr: 0.4,
-    backchannel: true, bc_thr: 0.4, bc_gap: 6, bc_phrases: 'Mm-hmm., Yeah., Right., Uh-huh., Mhm.',
+    ep_thr: 0.915, interrupt: true, barge_thr: 0.5, barge_after: 1.0,
+    backchannel: true, bc_thr: 0.4, bc_gap: 6, bc_phrases: 'Mm-hmm., Yeah., Right., Uh-huh., Mhm.', bc_llm: false,
     fast_start: true,
   },
   voice: { cfg: 1.0, temperature: 0 },
@@ -61,6 +66,19 @@ const DEFAULTS = {
 };
 
 const KICKOFF = '[The call just connected. Pick up the way you would when a friend calls, short and natural.]';
+
+// what someone says to show they are listening, not to take the turn
+const LISTENING_WORDS = new Set(['mm', 'mmm', 'mhm', 'mmhmm', 'mmhm', 'hmm', 'uhhuh', 'uh', 'huh', 'yeah', 'yep', 'yes', 'yup', 'right', 'okay', 'ok', 'sure', 'wow', 'oh', 'ah', 'totally', 'true', 'nice', 'cool', 'exactly', 'definitely']);
+
+function justListening(text) {
+  const words = text.toLowerCase().replace(/-/g, '').replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(Boolean);
+  return words.length <= 4 && words.every((w) => LISTENING_WORDS.has(w));
+}
+
+function resumeNote(text, rest) {
+  return '[They only said "' + (text || 'mm-hmm') + '" to show they are listening, not to take over. Carry on from where you got cut off, without repeating what you already said.' +
+    (rest ? ' You were in the middle of saying: "' + rest + '"' : '') + ']';
+}
 const STORE_KEY = 'breeze.talk';
 
 function clone(o) { return JSON.parse(JSON.stringify(o)); }
@@ -79,7 +97,9 @@ function loadSettings() {
     seen: d.seen,
     rules: typeof s.rules === 'string' && s.rules.trim() ? s.rules : d.rules,
     llm: { ...d.llm, ...s.llm },
-    turn: { ...d.turn, ...s.turn },
+    v: d.v,
+    // 0.4 let a plain "mm-hmm" stop the voice, longer interruptions get caught by talking over it now
+    turn: { ...d.turn, ...s.turn, ...(!(s.v >= 2) && s.turn && s.turn.barge_thr === 0.4 ? { barge_thr: d.turn.barge_thr } : {}) },
     voice: { ...d.voice, ...s.voice },
     ui: { ...d.ui, ...s.ui },
   };
@@ -317,6 +337,19 @@ class Call {
     this.pendingUser = '';
     this.level = { mic: 0, bot: 0 };
     this.cushion = 0.12;
+    this.turnNo = 0;
+    this.floor = -60;
+    this.bargeAt = 0;
+    this.lastVoiced = 0;
+    this.prefix = '';
+    this.cut = null;
+    this.cutWhole = false;
+    this.overTalk = 0;
+    this.overQuiet = 0;
+    this.cap = null;
+    this.anchorVoice = '';
+    this.bcBusy = false;
+    this.bcInfo = '';
     this.firstAudioAt = undefined;
   }
 
@@ -429,6 +462,34 @@ class Call {
     const pcm = new Int16Array(f.length);
     for (let i = 0; i < f.length; i++) pcm[i] = Math.max(-1, Math.min(1, f[i])) * 32767;
     this.tyger.send(pcm.buffer);
+    this.trackOverTalk(f);
+  }
+
+  // tygers barge score misses short "wait, hold on"s, so talking over the voice long enough counts too
+  trackOverTalk(f) {
+    let e = 0;
+    for (let i = 0; i < f.length; i += 2) e += f[i] * f[i];
+    const db = 10 * Math.log10(e / (f.length / 2) + 1e-12);
+    const dt = f.length / 2 / 16000;
+    // noise floor drops right away and creeps back up about 1 db a second
+    this.floor = db < this.floor ? db : this.floor + dt;
+    const voiced = !this.muted && db > Math.max(-48, this.floor + 12);
+    if (voiced) this.lastVoiced = performance.now();
+    const limit = Number(S.turn.barge_after);
+    if (!S.turn.interrupt || !(limit > 0) || this.state !== 'speaking' || !this.botAudible) {
+      this.overTalk = this.overQuiet = 0;
+      return;
+    }
+    if (voiced) { this.overTalk += dt; this.overQuiet = 0; } else if ((this.overQuiet += dt) > 0.3) this.overTalk = 0;
+    if (this.overTalk >= limit) this.barge(true);
+  }
+
+  // keep asks tyger to start the new turn with the audio that led up to the barge, its own BARGE already does
+  barge(keep) {
+    this.overTalk = this.overQuiet = 0;
+    this.cancelReply(false);
+    this.bargeAt = performance.now();
+    if (this.tyger && this.tyger.readyState === 1) this.tyger.send(JSON.stringify(keep ? { type: 'reset', keep: true } : { type: 'reset' }));
   }
 
   onAudio(buf) {
@@ -446,6 +507,8 @@ class Call {
     }
     const f = new Float32Array(pcm.length);
     for (let i = 0; i < pcm.length; i++) f[i] = pcm[i] / 32768;
+    const cap = this.cap;
+    if (cap && cap.rid === this.respId && cap.n < CFG.sample_rate * 20) { cap.chunks.push(f.slice()); cap.n += f.length; }
     this.player.port.postMessage({ pcm: f }, [f.buffer]);
     this.queued += pcm.length;
     if (this.state === 'thinking') this.state = 'speaking';
@@ -476,8 +539,15 @@ class Call {
 
   poll() {
     if (this.ended) return;
-    const audible = this.playing;
+    // a short gap between pieces still counts as talking, flipping modes restarts tygers barge warmup
+    const audible = this.playing || (this.state === 'speaking' && !this.speechDone);
     this.setMode(audible);
+    // stopped for something tyger never turned into a turn, and they have gone quiet again
+    const now = performance.now();
+    if (this.bargeAt && this.state === 'listening' && now - this.bargeAt > 3000 && now - (this.lastVoiced || 0) > 1500) {
+      this.bargeAt = 0;
+      this.resume('');
+    }
     if (this.state === 'speaking' && !audible && this.speechDone && !this.llmBusy && this.queued - this.played < 64) {
       this.state = 'listening';
       this.finishReply(false);
@@ -488,12 +558,14 @@ class Call {
     const label = { listening: 'Listening', thinking: 'Thinking', speaking: 'Speaking' }[this.state] || '';
     let status = this.muted ? 'Muted' : label;
     if (S.ui.timings && this.timingText) status += '  \u00b7  ' + this.timingText;
+    if (S.ui.timings && this.bcInfo) status += '  \u00b7  ' + this.bcInfo;
     $('#call-status').textContent = status;
   }
 
   onTurnEvent(ev) {
     if (this.ended) return;
     if (ev.kind === 'PARTIAL') {
+      this.lastPartial = ev.text || '';
       if (S.ui.captions) $('#cap-user').textContent = ev.text;
       // they kept talking before any audio came out, so start over with the whole thing
       if (this.state === 'thinking' && ev.text && ev.text.trim().length > 2 && this.firstAudioAt === null) {
@@ -501,7 +573,18 @@ class Call {
         this.cancelReply(true);
       }
     } else if (ev.kind === 'ENDPOINT') {
+      this.turnNo++;
+      this.lastPartial = '';
       const text = (ev.transcript || '').trim();
+      // a barge that turned out to be an "mm-hmm" or nothing at all, so pick the story back up
+      if (this.bargeAt) {
+        this.bargeAt = 0;
+        if (!text || justListening(text)) {
+          this.resume(text);
+          return;
+        }
+      }
+      this.cut = null;
       if (!text) return;
       if (this.state === 'thinking' && this.firstAudioAt === null && this.replyUser !== undefined) {
         if (!this.pendingUser && this.lastUserText) this.pendingUser = this.lastUserText;
@@ -516,9 +599,9 @@ class Call {
       this.reply(full);
     } else if (ev.kind === 'BARGE') {
       if (!S.turn.interrupt || this.state !== 'speaking') return;
-      this.cancelReply(false);
+      this.barge(false);
     } else if (ev.kind === 'BACKCHANNEL') {
-      this.backchannel();
+      this.backchannel(ev);
     }
   }
 
@@ -541,7 +624,13 @@ class Call {
     this.llmBusy = false;
     this.replyText = text;
     this.replyUser = KICKOFF;
+    this.startCapture();
     this.speech.send(JSON.stringify({ type: 'end', text }));
+  }
+
+  // with no saved voice, the first reply heard in full becomes the voice for backchannels
+  startCapture() {
+    this.cap = !this.ch.voice && !this.anchorVoice && S.turn.backchannel ? { rid: this.respId, base: this.queued, chunks: [], n: 0 } : null;
   }
 
   async reply(userText) {
@@ -555,7 +644,8 @@ class Call {
     this.tFirstToken = 0;
     this.tFirstPiece = 0;
     this.replyUser = userText;
-    this.lastUserText = userText === KICKOFF ? '' : userText;
+    this.lastUserText = userText.startsWith('[') ? '' : userText;
+    this.startCapture();
     const ctrl = new AbortController();
     this.abort = ctrl;
     const hist = this.history.slice(-Number(S.llm.history || 30));
@@ -635,18 +725,102 @@ class Call {
     if (this.replyUser === undefined) return;
     const now = this.played;
     const mine = this.pieces.filter((p) => p.rid === this.respId);
-    let said = this.replyText.trim();
+    const pre = this.prefix ? this.prefix + ' ' : '';
+    let said = (pre + this.replyText).trim();
+    this.cut = null;
     if (cut) {
-      const heard = mine.filter((p) => p.at < now).map((p) => p.text);
-      said = heard.length ? heard.join(' ').replace(/[.!?,\s]*$/, '') + '...' : '';
+      const heard = this.heardText(mine, now);
+      said = (pre + heard).trim();
+      // remember the rest from the start of the clause it stopped in, in case it was only an "mm-hmm"
+      const words = this.replyText.trim().split(/\s+/).filter(Boolean);
+      let i = Math.min(heard ? heard.split(/\s+/).length : 0, words.length);
+      while (i > 0 && i < words.length && !/[.,!?;:]$/.test(words[i - 1])) i--;
+      this.cut = { user: this.replyUser, keep: (pre + words.slice(0, i).join(' ')).trim(), rest: words.slice(i).join(' '), whole: this.cutWhole };
+      if (said) said = said.replace(/[.!?,\s]*$/, '') + '...';
     }
+    this.prefix = '';
     this.history.push({ role: 'user', content: this.replyUser });
     this.history.push({ role: 'assistant', content: said || '...' });
     this.replyUser = undefined;
+    if (this.cap && this.cap.rid === this.respId) {
+      if (!cut) this.registerAnchor(mine, this.cap);
+      this.cap = null;
+    }
     this.pieces = this.pieces.filter((p) => p.rid === this.respId && p.at > now);
   }
 
+  // a piece can be a whole paragraph, so cut its words by how much of its audio actually played
+  heardText(mine, now) {
+    const out = [];
+    mine.forEach((p, i) => {
+      if (p.at >= now) return;
+      const next = mine[i + 1];
+      // the piece still generating is longer than what arrived, so guess from its text too (~14 chars/s)
+      const len = next ? next.at - p.at : this.speechDone ? this.queued - p.at : Math.max(this.queued - p.at, p.text.length / 14 * CFG.sample_rate);
+      const frac = (now - p.at) / Math.max(1, len);
+      if (frac >= 0.97) { out.push(p.text); return; }
+      const words = p.text.split(/\s+/);
+      const k = Math.floor(words.length * frac);
+      if (k > 0) out.push(words.slice(0, k).join(' '));
+    });
+    return out.join(' ');
+  }
+
+  async registerAnchor(mine, cap) {
+    const all = new Float32Array(cap.n);
+    let o = 0;
+    for (const c of cap.chunks) { all.set(c, o); o += c.length; }
+    // whole pieces only so the transcript matches, up to about 12 s
+    let end = 0;
+    const texts = [];
+    for (let i = 0; i < mine.length; i++) {
+      const s = mine[i].at - cap.base, e = i + 1 < mine.length ? mine[i + 1].at - cap.base : cap.n;
+      if (s < 0) return;
+      if (e > cap.n || (texts.length && e > CFG.sample_rate * 12)) break;
+      texts.push(mine[i].text);
+      end = e;
+    }
+    if (end < CFG.sample_rate * 1.0) return;
+    const form = new FormData();
+    form.append('ref_audio', new Blob([wavBytes(all.subarray(0, end), CFG.sample_rate)], { type: 'audio/wav' }), 'anchor.wav');
+    form.append('ref_text', texts.join(' '));
+    try {
+      const res = await fetch('/v1/voices', { method: 'POST', body: form });
+      const j = await res.json();
+      if (!res.ok || !j.id || this.ended) return;
+      this.anchorVoice = j.id;
+      this.makeBackchannels();
+    } catch { /* backchannels just stay off */ }
+  }
+
+  bcVoice() { return this.ch.voice || this.anchorVoice || ''; }
+
+  // after a barge that was only an "mm-hmm", say the rest of what got cut, or let the llm pick it up
+  resume(text) {
+    const c = this.cut;
+    this.cut = null;
+    this.turnAt = performance.now();
+    if (!c || !c.whole || !c.rest || !this.speech) {
+      this.reply(resumeNote(text, c && c.rest));
+      return;
+    }
+    // the cut entry comes back out, the whole reply goes back in once the rest is spoken
+    const h = this.history;
+    if (h.length >= 2 && h[h.length - 1].role === 'assistant') h.splice(h.length - 2, 2);
+    this.respId++;
+    this.state = 'thinking';
+    this.firstAudioAt = null;
+    this.speechDone = false;
+    this.llmBusy = false;
+    this.prefix = c.keep;
+    this.replyText = c.rest;
+    this.replyUser = c.user;
+    this.speech.send(JSON.stringify({ type: 'end', text: c.rest }));
+  }
+
   cancelReply(dropUser) {
+    // a reply the llm already finished can be picked back up word for word
+    this.cutWhole = !this.llmBusy;
     if (this.abort) this.abort.abort();
     this.abort = null;
     this.llmBusy = false;
@@ -661,39 +835,82 @@ class Call {
     this.setMode(false);
   }
 
-  backchannel() {
-    if (!S.turn.backchannel || this.state !== 'listening' || !this.bcClips.length) return;
+  backchannel(ev) {
+    if (!S.turn.backchannel || this.state !== 'listening') return;
     const now = performance.now();
     if (now - this.lastBc < Number(S.turn.bc_gap) * 1000) return;
+    if (S.turn.bc_llm) {
+      if (!this.bcVoice() || this.bcBusy) return;
+      this.lastBc = now;
+      this.llmBackchannel(ev);
+      return;
+    }
+    if (!this.bcClips.length) return;
     this.lastBc = now;
-    const clip = this.bcClips[Math.floor(Math.random() * this.bcClips.length)];
+    this.playBackchannel(this.bcClips[Math.floor(Math.random() * this.bcClips.length)]);
+  }
+
+  playBackchannel(clip, text) {
     const src = this.ctx.createBufferSource();
-    src.buffer = clip;
+    src.buffer = clip.buf || clip;
     src.connect(this.bcGain);
     src.start();
+    if (S.ui.captions) $('#cap-bot').textContent = '(' + (text || clip.text || '...') + ')';
+  }
+
+  async speakClip(text) {
+    const body = { input: text, voice: this.bcVoice(), response_format: 'wav', max_new_tokens: 30, seed: Math.floor(Math.random() * 1e9) };
+    body.instructions = (this.ch.design || '').trim() || 'Speak clearly and naturally.';
+    body.cfg_scale = Number(S.voice.cfg);
+    const res = await fetch('/v1/audio/speech', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!res.ok) return null;
+    const ab = await this.ctx.decodeAudioData(await res.arrayBuffer());
+    return ab.duration > 0.2 && ab.duration < 2.2 ? ab : null;
+  }
+
+  // the llm writes a reaction to what they are saying right now, dropped if it shows up too late
+  async llmBackchannel(ev) {
+    this.bcBusy = true;
+    const t0 = performance.now(), turn = this.turnNo;
+    const late = () => this.ended || turn !== this.turnNo || this.state !== 'listening' || performance.now() - t0 > 1800;
+    try {
+      const heard = (ev.partial || this.lastPartial || '').trim();
+      if (!heard) return;
+      const hist = this.history.slice(-6);
+      while (hist.length && hist[0].role !== 'user') hist.shift();
+      const system = (this.ch.prompt || '').trim() + '\n\n' + BC_RULES;
+      const messages = [{ role: 'system', content: system }, ...hist, { role: 'user', content: '[They are still talking. So far they said: "' + heard + '"]' }];
+      const body = { messages, stream: false, temperature: 0.9, max_tokens: 12 };
+      if (S.llm.model) body.model = S.llm.model;
+      if (S.llm.no_think) body.reasoning_effort = 'none';
+      const headers = { 'Content-Type': 'application/json' };
+      if (S.llm.key) headers.Authorization = 'Bearer ' + S.llm.key;
+      const res = await fetch('/llm/chat/completions', { method: 'POST', headers, body: JSON.stringify(body) });
+      const j = await res.json();
+      let text = new SpeechFilter().push((j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '');
+      text = text.replace(/["“”]/g, '').trim().split(/\s+/).slice(0, 4).join(' ');
+      if (!text || late()) return;
+      const tText = performance.now();
+      const clip = await this.speakClip(text);
+      if (!clip || late()) return;
+      this.playBackchannel(clip, text);
+      this.bcInfo = 'backchannel "' + text + '" llm ' + ((tText - t0) / 1000).toFixed(2) + ' s, voice ' + ((performance.now() - tText) / 1000).toFixed(2) + ' s';
+    } catch { /* a missing backchannel is fine */ } finally {
+      this.bcBusy = false;
+    }
   }
 
   // short acknowledgements in the character's own voice, made once while the line is quiet
   async makeBackchannels() {
-    // without a saved voice each clip would come out as someone else
-    if (this.bcStarted || !S.turn.backchannel || !this.voiceId()) return;
+    if (this.bcStarted || !S.turn.backchannel || S.turn.bc_llm || !this.bcVoice()) return;
     this.bcStarted = true;
     const phrases = S.turn.bc_phrases.split(',').map((s) => s.trim()).filter(Boolean);
     for (const text of phrases) {
       if (this.ended) return;
       while (!this.ended && this.state !== 'listening') await new Promise((r) => setTimeout(r, 300));
-      const body = { input: text, voice: this.voiceId(), response_format: 'wav', max_new_tokens: 30, seed: Math.floor(Math.random() * 1e9) };
-      body.instructions = (this.ch.design || '').trim() || 'Speak clearly and naturally.';
-      body.cfg_scale = Number(S.voice.cfg);
       try {
-        const res = await fetch('/v1/audio/speech', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-        if (!res.ok) continue;
-        const ab = await this.ctx.decodeAudioData(await res.arrayBuffer());
-        if (ab.duration > 0.25 && ab.duration < 1.6) this.bcClips.push(ab);
+        const buf = await this.speakClip(text);
+        if (buf) this.bcClips.push({ buf, text });
       } catch { /* a missing backchannel is fine */ }
     }
   }
@@ -712,6 +929,7 @@ class Call {
     this.stopPlayback();
     if (this.stream) for (const t of this.stream.getTracks()) t.stop();
     if (this.ctx) this.ctx.close();
+    if (this.anchorVoice) fetch('/v1/voices/' + encodeURIComponent(this.anchorVoice), { method: 'DELETE', keepalive: true }).catch(() => {});
   }
 }
 
@@ -878,8 +1096,12 @@ function renderSettings() {
   h += field('Reply after you stop talking', range('turn.ep_thr', 0.6, 0.99, 0.005, 'sooner', 'waits longer'), 'Sooner feels snappier but cuts in during pauses.');
   h += check('turn.fast_start', 'Start speaking at the first comma instead of the first full sentence');
   h += check('turn.interrupt', 'Let me interrupt');
-  h += field('Interrupt sensitivity', range('turn.barge_thr', 0.15, 0.9, 0.05, 'stops easily', 'needs a clear interruption'));
-  h += check('turn.backchannel', 'Backchannels, short "mm-hmm" sounds while you talk (needs a saved voice)');
+  h += field('Interrupt sensitivity', range('turn.barge_thr', 0.15, 0.9, 0.05, 'stops easily', 'needs a clear interruption'), 'How sure tyger has to be that you want to talk. It can miss short ones like "wait, hold on", the next setting catches those.');
+  h += field('Also stop after talking over it for (seconds)', range('turn.barge_after', 0, 2.5, 0.1, 'off', 'long'), 'Short "mm-hmm"s stay under this. Needs headphones or good echo cancellation, or the voice can hear itself and stop.');
+  h += check('turn.backchannel', 'Backchannels, short "mm-hmm" sounds while you talk');
+  h += '<p class="field"><small>With no saved voice they start after the first reply, cloned from how the character sounded in it.</small></p>';
+  h += check('turn.bc_llm', 'Let the llm write each backchannel from what you are saying, instead of the phrases below');
+  h += '<p class="field"><small>More fitting reactions like "oh no" or "no way", but each one takes about a second to make, and one that would land too late gets skipped.</small></p>';
   h += field('How often', range('turn.bc_thr', 0.2, 0.9, 0.05, 'often', 'rarely'));
   h += field('Seconds between backchannels', '<input type="number" data-path="turn.bc_gap" min="1" max="60" value="' + S.turn.bc_gap + '">');
   h += field('Backchannel phrases', '<input type="text" data-path="turn.bc_phrases" value="' + esc(S.turn.bc_phrases) + '">', 'Comma separated.');
