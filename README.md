@@ -308,6 +308,11 @@ A WebSocket server also comes up on the HTTP port plus one. It takes text increm
 back as it is produced, and supports changing the delivery instruction or cancelling mid sentence,
 which is what you want when driving it from a chat model. See [docs/websocket.md](docs/websocket.md).
 
+`--talk` adds a voice call demo at `/talk`: pick a character and talk to it out loud. It uses
+[tyger-server](https://github.com/HoppouAI/tyger.cpp) for turn taking and interruptions and any
+OpenAI compatible chat server for the replies. See
+[docs/server.md](docs/server.md#voice-call-demo).
+
 > **Neither port has authentication or rate limiting.** Keep them bound to `127.0.0.1` unless something
 > in front of them is handling that.
 

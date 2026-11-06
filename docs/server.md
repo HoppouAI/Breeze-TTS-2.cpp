@@ -25,6 +25,7 @@ breeze-server <model.gguf> [--host H] [--port P] [--webui] [--cpu]
                            [--chunk-first N] [--chunk-max N] [--verbose]
                            [--voices-dir PATH] [--ws-port P] [--split-chars N]
                            [--cors [ORIGINS]] [--no-warmup] [--parallel N]
+                           [--talk] [--llm URL] [--tyger URL]
 ```
 
 | Flag | Default | Meaning |
@@ -43,6 +44,9 @@ breeze-server <model.gguf> [--host H] [--port P] [--webui] [--cpu]
 | `--cors` | off | Let browser pages on other origins call the API. On its own it allows any origin; give a comma separated list to allow only those. See [Cross origin requests](#cross-origin-requests). |
 | `--no-warmup` | off | Skip the warm up at startup. See below. |
 | `--parallel` | `1` | Streams generating at once. A stream using guidance counts as two. See [performance.md](performance.md#running-several-streams). |
+| `--talk` | off | Serve the voice call demo at `/talk`. See [Voice call demo](#voice-call-demo). |
+| `--llm` | `http://127.0.0.1:1234/v1` with `--talk` | OpenAI compatible server the demo gets its replies from, passed through under `/llm/`. |
+| `--tyger` | `ws://127.0.0.1:8765/ws` | tyger-server websocket the demo uses for turn taking. |
 
 ```
 breeze-server breeze-tts-2-q4_k.gguf --port 8137 --webui
@@ -551,3 +555,52 @@ The assets are compiled into the binary at build time from the
 [webui](../webui) folder by `cmake/embed_webui.cmake`, so there is no static
 directory to deploy. Editing a file there and rebuilding is enough to pick up
 changes.
+
+## Voice call demo
+
+`--talk` serves a voice call page at `/talk`. You pick a character, it picks up,
+and you talk to it out loud. It needs two other things running:
+
+- [tyger-server](https://github.com/HoppouAI/tyger.cpp) for speech recognition and
+  turn taking. It decides when you finished talking, when you are interrupting, and
+  when a short "mm-hmm" fits.
+- Any OpenAI compatible chat server, such as LM Studio, Ollama or llama.cpp's
+  server, for the replies. The page calls it through `/llm/` on this server, so
+  the chat server does not need CORS.
+
+```
+tyger-server -m models/tyger-q8_0.gguf --port 8765
+breeze-server breeze-tts-2-q4_k.gguf --talk --llm http://127.0.0.1:1234/v1
+```
+
+Then open http://127.0.0.1:8080/talk. Headphones work best, since the page has
+no echo cancellation of its own beyond what the browser does.
+
+| Route | Serves |
+| --- | --- |
+| `GET /talk` | the page |
+| `GET /talk/config` | websocket port, tyger address and sample rate for the page |
+| `GET, POST /llm/...` | passed through to the `--llm` server, streaming |
+
+Replies stream from the chat server straight into a [WebSocket](websocket.md)
+session. The first clause goes out with `flush` so speech starts before the
+sentence is finished, and the rest follows as `text`. When you talk over the
+character the session is cancelled, and only the part you actually heard goes
+into the chat history, ending in "..." so the model knows it was cut off.
+
+Everything is set in the page under Settings and kept in the browser:
+
+- **Characters.** Name, color, personality and an optional opening line. The
+  voice is either a saved voice or a description for voice design. A saved voice
+  sounds the same every call; a designed one changes a little each time. The
+  page can also clone a new voice from a file or a recording, transcribing it
+  with tyger.
+- **Speaking rules.** Added after every character's personality. The defaults
+  keep replies short and casual, use "..." for pauses, and allow vocal event tags
+  like `(laugh)` or `(sigh)` so the voice can actually laugh.
+- **Turn taking.** How long to wait before replying, whether you can interrupt
+  and how easily, and backchannels. Backchannels are generated once per call
+  in the character's saved voice, so they need one.
+- **Voice.** Guidance and temperature for the speech model.
+- **Conversation.** Which chat model, temperature, reply length, an API key for
+  hosted servers, and whether to skip the thinking step on reasoning models.
