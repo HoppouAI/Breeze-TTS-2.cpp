@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice Call</title>
+<link rel="stylesheet" href="/talk.css">
+</head>
+<body>
+<header class="top">
+  <span class="mark">voice call</span>
+  <button class="link" id="open-settings" type="button">Settings</button>
+</header>
+
+<main>
+  <section id="view-pick" class="view">
+    <div class="card" id="tiles"></div>
+    <p class="note">Headphones work best. <button class="link" id="add-char" type="button">New character</button></p>
+  </section>
+
+  <section id="view-connect" class="view" hidden>
+    <div class="card solid" id="connect-card"><p class="connect-text"><span id="connect-name"></span><span class="dots"></span></p></div>
+  </section>
+
+  <section id="view-call" class="view call" hidden>
+    <div class="call-head">
+      <h1 id="call-name"></h1>
+      <p class="timer" id="call-timer">00:00</p>
+    </div>
+    <div class="orb-wrap"><canvas id="orb"></canvas></div>
+    <div class="captions" id="captions" hidden><p class="cap-user" id="cap-user"></p><p class="cap-bot" id="cap-bot"></p></div>
+    <div class="controls">
+      <button type="button" id="btn-mute"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5a2.5 2.5 0 0 0-2.5 2.5v5a2.5 2.5 0 0 0 5 0V5A2.5 2.5 0 0 0 10 2.5Z" fill="currentColor"/><path d="M5 9.5a5 5 0 0 0 10 0M10 14.5v3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg><span id="mute-label">Mute</span></button>
+      <button type="button" id="btn-end"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="5" width="10" height="10" fill="currentColor"/></svg><span>End call</span></button>
+    </div>
+    <p class="status" id="call-status"></p>
+  </section>
+
+  <section id="view-ended" class="view" hidden>
+    <h2 id="ended-title"></h2>
+    <p class="note" id="ended-detail"></p>
+    <div class="row-buttons">
+      <button type="button" class="primary" id="btn-again">Call again</button>
+      <button type="button" class="link" id="btn-back">Back</button>
+    </div>
+  </section>
+</main>
+
+<div class="toast" id="toast" hidden></div>
+
+<aside class="drawer" id="drawer" hidden>
+  <div class="drawer-head">
+    <h2>Settings</h2>
+    <button class="link" id="close-settings" type="button">Done</button>
+  </div>
+  <div class="drawer-body" id="drawer-body"></div>
+</aside>
+
+<script src="/talk.js"></script>
+</body>
+</html>

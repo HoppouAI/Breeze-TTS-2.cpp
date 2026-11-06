@@ -104,6 +104,9 @@ add_custom_command(
         ${CMAKE_CURRENT_SOURCE_DIR}/webui/index.html
         ${CMAKE_CURRENT_SOURCE_DIR}/webui/style.css
         ${CMAKE_CURRENT_SOURCE_DIR}/webui/app.js
+        ${CMAKE_CURRENT_SOURCE_DIR}/webui/talk.html
+        ${CMAKE_CURRENT_SOURCE_DIR}/webui/talk.css
+        ${CMAKE_CURRENT_SOURCE_DIR}/webui/talk.js
         ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_webui.cmake
     COMMENT "Embedding WebUI assets"
     VERBATIM
@@ -134,7 +137,7 @@ breeze_utf8(breeze-quantize)
 if(BREEZE_BUILD_SERVER)
     add_executable(breeze-server apps/server/main.cpp apps/server/server.cpp apps/server/voices.cpp
                                  apps/server/ws.cpp apps/server/ws_api.cpp apps/server/openai.cpp
-                                 apps/server/encode.cpp)
+                                 apps/server/encode.cpp apps/server/llm_proxy.cpp)
     add_dependencies(breeze-server breeze_webui)
     target_include_directories(breeze-server PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated third_party)
     target_link_libraries(breeze-server PRIVATE breeze_core)

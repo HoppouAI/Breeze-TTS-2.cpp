@@ -12,6 +12,7 @@ int main(int argc, char ** argv) {
         printf("                     [--chunk-first N] [--chunk-max N] [--verbose]\n");
         printf("                     [--voices-dir PATH] [--ws-port P] [--split-chars N]\n");
         printf("                     [--cors [ORIGINS]] [--no-warmup] [--parallel N]\n");
+        printf("                     [--talk] [--llm URL] [--tyger URL]\n");
         printf("\n");
         printf("  --chunk-first  fewest frames in the first streamed chunk, lower starts sooner (default 1).\n");
         printf("                 it goes up by itself when the gpu is too busy to stay ahead with that few\n");
@@ -31,6 +32,10 @@ int main(int argc, char ** argv) {
         printf("                 it pauses the other streams\n");
         printf("  --parallel N   streams generating at once (default 1), more than that get told the\n");
         printf("                 server is busy. a stream using cfg counts as two\n");
+        printf("  --talk         serve the voice call demo at /talk, needs tyger-server and an llm\n");
+        printf("  --llm URL      openai compatible server the demo gets its replies from, passed\n");
+        printf("                 through under /llm/ (default http://127.0.0.1:1234/v1 with --talk)\n");
+        printf("  --tyger URL    tyger-server websocket for the demo (default ws://127.0.0.1:8765/ws)\n");
         printf("  --no-warmup    skip the short throwaway generation at startup, the first request\n");
         printf("                 then pays for setting up the gpu pipelines instead\n");
         return argc < 2 ? 1 : 0;
@@ -52,15 +57,18 @@ int main(int argc, char ** argv) {
         else if (a == "--split-chars" && i + 1 < argc) opts.split_chars = atoi(argv[++i]);
         else if (a == "--no-warmup") opts.warmup = false;
         else if (a == "--parallel" && i + 1 < argc) opts.parallel = atoi(argv[++i]);
+        else if (a == "--talk") opts.talk = true;
+        else if (a == "--llm" && i + 1 < argc) opts.llm = argv[++i];
+        else if (a == "--tyger" && i + 1 < argc) opts.tyger = argv[++i];
         else if (a == "--cors") {
-            // the origin list is optional. origins always start with a scheme, so anything
-            // starting with a dash is the next flag rather than a value for this one
+            // origins start with a scheme, so a dash here is the next flag not an origin list
             opts.cors = "*";
             if (i + 1 < argc && argv[i + 1][0] != '-') opts.cors = argv[++i];
         }
         else { fprintf(stderr, "unknown arg: %s\n", a.c_str()); return 1; }
     }
     if (opts.split_chars < 0) opts.split_chars = 0;
+    if (opts.talk && opts.llm.empty()) opts.llm = "http://127.0.0.1:1234/v1";
     if (opts.parallel < 1) {
         fprintf(stderr, "--parallel must be at least 1\n");
         return 1;

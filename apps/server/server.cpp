@@ -3,6 +3,7 @@
 #include "openai.h"
 #include "voices.h"
 #include "ws.h"
+#include "llm_proxy.h"
 #include "ws_api.h"
 
 #include "breeze/audio.h"
@@ -46,6 +47,15 @@ static std::string bar(double frac, int width) {
         for (int i = full + 1; i < width; i++) s += " ";
     }
     return s;
+}
+
+static std::string json_quote(const std::string & s) {
+    std::string o = "\"";
+    for (const char c : s) {
+        if (c == '"' || c == '\\') o += '\\';
+        if ((unsigned char) c >= 0x20) o += c;
+    }
+    return o + "\"";
 }
 
 // an origin thats not on the allowlist gets an empty string, so no header goes out
@@ -429,6 +439,26 @@ int run_server(const ServerOptions & opts) {
         });
         printf("web ui: http://%s:%d/\n", opts.host.c_str(), opts.port);
     }
+
+    if (opts.talk) {
+        svr.Get("/talk", [](const httplib::Request &, httplib::Response & res) {
+            res.set_content(breeze_webui::talk_html, "text/html");
+        });
+        svr.Get("/talk.css", [](const httplib::Request &, httplib::Response & res) {
+            res.set_content(breeze_webui::talk_css, "text/css");
+        });
+        svr.Get("/talk.js", [](const httplib::Request &, httplib::Response & res) {
+            res.set_content(breeze_webui::talk_js, "application/javascript");
+        });
+        svr.Get("/talk/config", [&, ws_port, sr](const httplib::Request &, httplib::Response & res) {
+            res.set_content("{\"ws_port\":" + std::to_string(ws_port) + ",\"tyger\":" + json_quote(opts.tyger) +
+                                ",\"sample_rate\":" + std::to_string(sr) + "}",
+                            "application/json");
+        });
+        if (ws_port > 0) printf("voice call demo: http://%s:%d/talk\n", opts.host.c_str(), opts.port);
+        else fprintf(stderr, "the voice call demo needs the websocket, drop --ws-port -1\n");
+    }
+    if (!opts.llm.empty()) add_llm_proxy(svr, opts.llm);
 
     if (!opts.cors.empty()) {
         // post routing hits every response, errors and the chunked stream included

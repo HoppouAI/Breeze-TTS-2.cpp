@@ -20,6 +20,9 @@ struct ServerOptions {
     int parallel = 1; // streams generating at once, more than this get told the server is busy
     bool warmup = true;
     std::string cors; // empty turns cors off, "*" allows any origin, otherwise a comma separated allowlist
+    bool talk = false; // the voice call demo at /talk
+    std::string llm; // openai compatible base url the demo talks to, proxied under /llm/
+    std::string tyger = "ws://127.0.0.1:8765/ws"; // where the demo finds tyger-server
 };
 
 int run_server(const ServerOptions & opts);
