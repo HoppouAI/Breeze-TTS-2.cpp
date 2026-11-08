@@ -7,6 +7,7 @@
   --panel: #1a1917;
   --field: #24231f;
   --warn: #e0835c;
+  --live: #7fb59a;
   --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
   --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
@@ -128,6 +129,24 @@ main {
 .controls button:hover { background: var(--field); }
 .controls svg { width: 16px; height: 16px; }
 .controls button[aria-pressed="true"] { color: var(--warn); }
+#btn-screen[aria-pressed="true"] { color: var(--live); }
+
+.call.sharing .orb-wrap { min-height: 0; }
+.call.sharing #orb { width: min(180px, 30vh, 60vw); height: min(180px, 30vh, 60vw); }
+
+.screen-view {
+  width: min(360px, 90vw);
+  max-height: min(200px, 28vh);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #000;
+  object-fit: contain;
+}
+.screen-view[hidden], .controls button[hidden] { display: none; }
+
+@media (max-width: 520px) {
+  .controls button { min-width: 0; padding: 14px 16px; }
+}
 
 .status { color: var(--dim); font-size: 13px; margin: 4px 0 0; min-height: 1.3em; text-align: center; }
 

@@ -62,8 +62,11 @@ const DEFAULTS = {
     fast_start: true,
   },
   voice: { cfg: 1.0, temperature: 0 },
+  screen: { size: 1024 },
   ui: { captions: false, timings: false },
 };
+
+const SCREEN_NOTE = `They are sharing their screen with you. The picture with their latest message is what is on it right now, so you can see it. Bring it up when it fits, the way a friend looking over their shoulder would, and keep it short. Never read long text off the screen word for word.`;
 
 const KICKOFF = '[The call just connected. Pick up the way you would when a friend calls, short and natural.]';
 
@@ -101,6 +104,7 @@ function loadSettings() {
     // 0.4 let a plain "mm-hmm" stop the voice, longer interruptions get caught by talking over it now
     turn: { ...d.turn, ...s.turn, ...(!(s.v >= 2) && s.turn && s.turn.barge_thr === 0.4 ? { barge_thr: d.turn.barge_thr } : {}) },
     voice: { ...d.voice, ...s.voice },
+    screen: { ...d.screen, ...s.screen },
     ui: { ...d.ui, ...s.ui },
   };
 }
@@ -351,6 +355,49 @@ class Call {
     this.bcBusy = false;
     this.bcInfo = '';
     this.firstAudioAt = undefined;
+    this.screen = null;
+    this.noVision = false;
+  }
+
+  async shareScreen() {
+    if (this.screen) { this.stopScreen(); return; }
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 5 }, audio: false });
+    } catch {
+      return;
+    }
+    if (this.ended) { stream.getTracks().forEach((t) => t.stop()); return; }
+    const video = $('#screen-view');
+    video.srcObject = stream;
+    video.hidden = false;
+    try { await video.play(); } catch { /* still draws once frames arrive */ }
+    this.screen = { stream, video, canvas: document.createElement('canvas') };
+    this.noVision = false;
+    stream.getVideoTracks()[0].addEventListener('ended', () => this.stopScreen());
+    screenButton(true);
+  }
+
+  stopScreen() {
+    if (!this.screen) return;
+    this.screen.stream.getTracks().forEach((t) => t.stop());
+    this.screen.video.srcObject = null;
+    this.screen.video.hidden = true;
+    this.screen = null;
+    screenButton(false);
+  }
+
+  // grabbed when the reply starts, so the model sees the screen as it is right now
+  screenFrame() {
+    if (!this.screen || this.noVision) return '';
+    const { video, canvas } = this.screen;
+    const w = video.videoWidth, h = video.videoHeight;
+    if (!w || !h) return '';
+    const k = Math.min(1, Number(S.screen.size || 1024) / Math.max(w, h));
+    canvas.width = Math.round(w * k);
+    canvas.height = Math.round(h * k);
+    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.8);
   }
 
   async start() {
@@ -650,9 +697,13 @@ class Call {
     this.abort = ctrl;
     const hist = this.history.slice(-Number(S.llm.history || 30));
     while (hist.length && hist[0].role !== 'user') hist.shift();
-    const system = (this.ch.prompt || '').trim() + '\n\n' + (S.rules || '');
-    const messages = [{ role: 'system', content: system }, ...hist, { role: 'user', content: userText }];
+    const img = this.screenFrame();
+    const system = (this.ch.prompt || '').trim() + '\n\n' + (S.rules || '') + (img ? '\n\n' + SCREEN_NOTE : '');
+    // only the newest turn carries a picture, older ones stay text so the context doesnt balloon
+    const content = img ? [{ type: 'text', text: userText }, { type: 'image_url', image_url: { url: img } }] : userText;
+    const messages = [{ role: 'system', content: system }, ...hist, { role: 'user', content }];
     const body = { messages, stream: true, temperature: Number(S.llm.temperature), max_tokens: Number(S.llm.max_tokens) };
+    let retry = false;
     if (S.llm.model) body.model = S.llm.model;
     if (S.llm.no_think) body.reasoning_effort = 'none';
     const headers = { 'Content-Type': 'application/json' };
@@ -713,11 +764,18 @@ class Call {
       if (!this.replyText.trim()) { this.state = 'listening'; this.speechDone = true; }
     } catch (e) {
       if (e.name === 'AbortError' || rid !== this.respId) return;
-      toast('Could not get a reply: ' + e.message + '\nIs the llm server running, and is --llm pointing at it?');
+      if (img && !this.replyText.trim() && !/could not reach/.test(e.message)) {
+        this.noVision = true;
+        retry = true;
+        toast('The model could not take the screen picture, so it answered without seeing it. Load a vision model in your llm server to use screen sharing.\n' + e.message, 9000);
+      } else {
+        toast('Could not get a reply: ' + e.message + '\nIs the llm server running, and is --llm pointing at it?');
+      }
       this.state = 'listening';
     } finally {
       if (rid === this.respId) this.llmBusy = false;
     }
+    if (retry && rid === this.respId && !this.ended) this.reply(userText);
   }
 
   // what actually got heard goes into the history, a cut off reply ends in ... so the llm knows
@@ -923,6 +981,7 @@ class Call {
 
   stop() {
     this.ended = true;
+    this.stopScreen();
     clearInterval(this.tick);
     if (this.abort) this.abort.abort();
     for (const ws of [this.tyger, this.speech]) { try { ws && ws.close(); } catch { /* closing anyway */ } }
@@ -1017,8 +1076,15 @@ async function startCall(ch) {
   $('#cap-bot').textContent = '';
   $('#btn-mute').setAttribute('aria-pressed', 'false');
   $('#mute-label').textContent = 'Mute';
+  screenButton(false);
   show('call');
   runOrb();
+}
+
+function screenButton(on) {
+  $('#btn-screen').setAttribute('aria-pressed', String(on));
+  $('#screen-label').textContent = on ? 'Stop sharing' : 'Share screen';
+  $('#view-call').classList.toggle('sharing', on);
 }
 
 function end() {
@@ -1109,6 +1175,9 @@ function renderSettings() {
   h += '<h3>Voice</h3>';
   h += field('Guidance', range('voice.cfg', 1, 4, 0.1, 'fast, plain', 'follows tags harder'), 'Above 1 every frame runs twice, so it is about half as fast. Sound tags past laugh, sigh and cough mostly need 2 to 3.');
   h += field('Temperature', range('voice.temperature', 0, 1.3, 0.05, 'model default', 'lively'));
+
+  h += '<h3>Screen sharing</h3>';
+  h += field('Picture size (pixels on the long side)', range('screen.size', 512, 1920, 128, 'faster', 'sharper'), 'Needs a vision model in your llm server, like Gemma 3 or Qwen2.5 VL. A fresh picture goes with everything you say while sharing, and a bigger one makes small text readable but adds time before each reply.');
 
   h += '<h3>Display</h3>';
   h += check('ui.captions', 'Show captions during the call');
@@ -1356,6 +1425,8 @@ async function init() {
     $('#btn-mute').setAttribute('aria-pressed', String(on));
     $('#mute-label').textContent = on ? 'Unmute' : 'Mute';
   };
+  if (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) $('#btn-screen').onclick = () => call && call.shareScreen();
+  else $('#btn-screen').hidden = true;
   $('#btn-again').onclick = () => lastCharacter && startCall(lastCharacter);
   $('#btn-back').onclick = () => show('pick');
   window.addEventListener('beforeunload', () => { if (call) call.stop(); });

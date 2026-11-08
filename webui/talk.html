@@ -28,8 +28,10 @@
       <p class="timer" id="call-timer">00:00</p>
     </div>
     <div class="orb-wrap"><canvas id="orb"></canvas></div>
+    <video class="screen-view" id="screen-view" muted playsinline hidden></video>
     <div class="captions" id="captions" hidden><p class="cap-user" id="cap-user"></p><p class="cap-bot" id="cap-bot"></p></div>
     <div class="controls">
+      <button type="button" id="btn-screen" aria-pressed="false"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="10" rx="1.5" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M7 17h6M10 13.5V17" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><span id="screen-label">Share screen</span></button>
       <button type="button" id="btn-mute"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5a2.5 2.5 0 0 0-2.5 2.5v5a2.5 2.5 0 0 0 5 0V5A2.5 2.5 0 0 0 10 2.5Z" fill="currentColor"/><path d="M5 9.5a5 5 0 0 0 10 0M10 14.5v3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg><span id="mute-label">Mute</span></button>
       <button type="button" id="btn-end"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="5" width="10" height="10" fill="currentColor"/></svg><span>End call</span></button>
     </div>
