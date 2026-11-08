@@ -78,6 +78,21 @@ function justListening(text) {
   return words.length <= 4 && words.every((w) => LISTENING_WORDS.has(w));
 }
 
+const LOOPBACK = new Set(['127.0.0.1', 'localhost', '0.0.0.0', '[::1]', '[::]']);
+const isLoopback = (h) => LOOPBACK.has(h) || h.endsWith('.localhost');
+
+// a loopback address from the server means its own machine, which is wherever this page came from
+function onPageHost(url) {
+  try {
+    const u = new URL(url);
+    if (isLoopback(u.hostname) && !isLoopback(location.hostname)) u.hostname = location.hostname;
+    if (location.protocol === 'https:' && u.protocol === 'ws:') u.protocol = 'wss:';
+    return u.href;
+  } catch {
+    return url;
+  }
+}
+
 function resumeNote(text, rest) {
   return '[They only said "' + (text || 'mm-hmm') + '" to show they are listening, not to take over. Carry on from where you got cut off, without repeating what you already said.' +
     (rest ? ' You were in the middle of saying: "' + rest + '"' : '') + ']';
@@ -401,6 +416,9 @@ class Call {
   }
 
   async start() {
+    if (!window.isSecureContext || !navigator.mediaDevices) {
+      throw new Error('This browser only allows the microphone on https or on localhost. Open the page over https, or as http://localhost' + (location.port ? ':' + location.port : '') + '/talk on the machine running the server.');
+    }
     this.ctx = new AudioContext({ sampleRate: 48000 });
     const url = URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' }));
     await this.ctx.audioWorklet.addModule(url);
@@ -452,7 +470,8 @@ class Call {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(url);
       ws.binaryType = 'arraybuffer';
-      const fail = () => reject(new Error('Could not reach tyger-server at ' + CFG.tyger + '. Start it with\ntyger-server -m models/tyger-f16.gguf --port 8765'));
+      const remote = !isLoopback(location.hostname);
+      const fail = () => reject(new Error('Could not reach tyger-server at ' + CFG.tyger + '. Start it with\ntyger-server -m models/tyger-f16.gguf --port 8765' + (remote ? ' --host 0.0.0.0\nso other devices can reach it.' : '')));
       ws.onerror = fail;
       ws.onmessage = (e) => {
         const m = JSON.parse(e.data);
@@ -475,7 +494,7 @@ class Call {
   }
 
   openSpeech() {
-    const url = 'ws://' + location.hostname + ':' + CFG.ws_port + '/';
+    const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.hostname + ':' + CFG.ws_port + '/';
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(url);
       ws.binaryType = 'arraybuffer';
@@ -1413,6 +1432,7 @@ async function openSettings() {
 
 async function init() {
   try { CFG = { ...CFG, ...(await (await fetch('/talk/config')).json()) }; } catch { /* defaults */ }
+  CFG.tyger = onPageHost(CFG.tyger);
   renderTiles();
   $('#open-settings').onclick = openSettings;
   $('#close-settings').onclick = () => { $('#drawer').hidden = true; };
