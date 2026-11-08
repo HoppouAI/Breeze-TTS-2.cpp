@@ -69,6 +69,17 @@ endif()
 # windows hands argv and narrow paths over in the ansi code page unless the exe opts into utf-8
 set(BREEZE_UTF8_RC ${CMAKE_CURRENT_BINARY_DIR}/generated/utf8.rc)
 file(WRITE ${BREEZE_UTF8_RC} "1 24 \"${CMAKE_CURRENT_SOURCE_DIR}/cmake/utf8.manifest\"\n")
+# newer mingw links its own default manifest under the same id and ld keeps both, an empty stand in found first via -B stops that
+if(MINGW)
+    set(BREEZE_NOMANIFEST ${CMAKE_CURRENT_BINARY_DIR}/generated/nomanifest)
+    file(MAKE_DIRECTORY ${BREEZE_NOMANIFEST})
+    file(WRITE ${BREEZE_NOMANIFEST}/empty.c "")
+    execute_process(COMMAND ${CMAKE_C_COMPILER} -c ${BREEZE_NOMANIFEST}/empty.c -o ${BREEZE_NOMANIFEST}/default-manifest.o
+                    RESULT_VARIABLE nomanifest_rc)
+    if(nomanifest_rc EQUAL 0)
+        add_link_options(-B${BREEZE_NOMANIFEST}/)
+    endif()
+endif()
 function(breeze_utf8 target)
     if(MSVC)
         target_sources(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cmake/utf8.manifest)
