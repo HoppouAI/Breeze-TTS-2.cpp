@@ -608,5 +608,12 @@ Everything is set in the page under Settings and kept in the browser:
   by the chat model from what you are saying, which fits better but takes
   about a second each.
 - **Voice.** Guidance and temperature for the speech model.
+- **Screen sharing.** The Share screen button in a call lets the character see
+  your screen, like a video call. While you share, a fresh picture of the
+  screen goes with everything you say, and only the newest one is sent, so the
+  chat history stays text. It needs a chat model that takes images. If yours
+  does not, the page says so and the character answers without the picture.
+  The picture size setting trades readable small text against time before
+  each reply.
 - **Conversation.** Which chat model, temperature, reply length, an API key for
   hosted servers, and whether to skip the thinking step on reasoning models.

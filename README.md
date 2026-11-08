@@ -328,7 +328,8 @@ which is what you want when driving it from a chat model. See [docs/websocket.md
 
 `--talk` adds a voice call demo at `/talk`: pick a character and talk to it out loud. It uses
 [tyger-server](https://github.com/HoppouAI/tyger.cpp) for turn taking and interruptions and any
-OpenAI compatible chat server for the replies. See
+OpenAI compatible chat server for the replies. You can share your screen in a call so the
+character can see it, with a chat model that takes images. See
 [docs/server.md](docs/server.md#voice-call-demo).
 
 > **Neither port has authentication or rate limiting.** Keep them bound to `127.0.0.1` unless something
