@@ -50,6 +50,19 @@ That is on Vulkan. CUDA at Q4_K measures 2.12x, and 1.70x at `cfg_scale` 3.
 
 Time to first audio on a warmed up server is about 80 ms, down from about 180 ms on v0.1.5.
 
+On a stock RTX 3080 12 GB, no unlock, same version and Vulkan, median of 4 seeds:
+
+| Model | `cfg_scale` 1 | `cfg_scale` 3 |
+| --- | --- | --- |
+| Q4_K | 3.50x | 2.81x |
+| Q6_K | 3.67x | 2.87x |
+| Q8_0 with a Q4_K depth decoder | 3.72x | 2.83x |
+| Q8_0 | 3.16x | 2.71x |
+| F16 | 2.71x | 2.32x |
+
+It has far more memory bandwidth than the 3060, so the weight type matters much less there: Q8_0 is
+only about 10% behind Q4_K, and even F16 runs well ahead of realtime.
+
 ### Several streams at once
 
 Start the server with `--parallel 3` and it generates up to three streams together, sharing one GPU
@@ -64,6 +77,11 @@ apart:
 | 1 with guidance, 2 without | Q8_0 | 1.15x to 1.28x | none |
 | 2 with guidance | Q8_0 | 1.16x to 1.19x | none |
 | 3 with guidance | Q8_0 | 0.87x to 0.95x | about 3 s, does not keep up |
+
+On the RTX 3080 every one of these keeps up, the last one included, at about 1.5x for three
+streams with guidance. Five streams at Q8_0 run at 1.46x to 1.68x each with no gaps, and
+`--parallel 6` is safe with any model, see
+[docs/performance.md](docs/performance.md#several-streams-on-an-rtx-3080).
 
 A stream using guidance counts as two, so `--parallel 4` fits any of these except the last one. When
 every slot is taken, the HTTP routes answer `409` and a WebSocket session waits its turn.
