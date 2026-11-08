@@ -576,6 +576,14 @@ breeze-server breeze-tts-2-q4_k.gguf --talk --llm http://127.0.0.1:1234/v1
 Then open http://127.0.0.1:8080/talk. Headphones work best, since the page has
 no echo cancellation of its own beyond what the browser does.
 
+The page reaches everything through the address you opened it on. The speech
+socket goes to that host, the chat server goes through `/llm/` on this server,
+and a loopback `--tyger` address like the default is swapped for that host
+too. To use it from another device, start both servers with `--host 0.0.0.0`.
+Browsers only allow the microphone on https or on localhost, so from another
+device the page has to be served over https, for example behind a reverse
+proxy. Behind https the sockets switch to `wss://` on their own.
+
 | Route | Serves |
 | --- | --- |
 | `GET /talk` | the page |
