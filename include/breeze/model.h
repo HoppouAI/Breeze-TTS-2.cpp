@@ -12,9 +12,10 @@ namespace breeze {
 
 struct BreezeModel {
     Backend backend;
-    // only used for the text encoder with te_cpu
+    // only used to offload text-encoder weights or embedding lookup
     Backend cpu;
     bool te_cpu = false;
+    bool te_embedding_cpu = false;
     GGUFModel gg;
     BreezeConfig cfg;
     Tokenizer tok;
