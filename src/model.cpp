@@ -15,7 +15,7 @@ bool BreezeModel::load(const std::string & path, bool prefer_gpu, bool want_te_c
     if (te && *te && strcmp(te, "0") != 0) want_te_cpu = true;
     te_cpu = backend.is_gpu && want_te_cpu;
     const char * embedding = std::getenv("BREEZE_TE_EMBED_CPU");
-    te_embedding_cpu = backend.is_gpu && !te_cpu && embedding && strcmp(embedding, "1") == 0;
+    te_embedding_cpu = backend.is_gpu && !te_cpu && embedding && *embedding && strcmp(embedding, "0") != 0;
     if (te_cpu || te_embedding_cpu) {
         cpu.init(false);
         const char * nt = std::getenv("BREEZE_TE_THREADS");
