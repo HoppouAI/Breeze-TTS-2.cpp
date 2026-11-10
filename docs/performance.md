@@ -178,6 +178,17 @@ exactly repeatable output, use `--parallel 1` and generate one request at a time
 
 ## Short on video memory
 
+With a GPU backend, set `BREEZE_TE_EMBED_CPU=1` for a smaller reduction. It keeps only
+`te.token_embd.weight` in system RAM, looks up the selected rows with one CPU
+thread, and transfers those F32 rows to the GPU. Every text-encoder layer still
+runs on the GPU. On the bundled Q8_0 model, the table is about 306 MiB. This
+environment setting works with the CLI, server, C API and Python bindings, and
+is off by default. `BREEZE_TE_THREADS` does not affect its one-thread lookup.
+
+`--te-cpu` or `BREEZE_TE_CPU=1` takes precedence when both modes are requested:
+it moves the full text encoder to the CPU and uses `BREEZE_TE_THREADS` as
+described below.
+
 `--te-cpu` keeps the text encoder's weights in system memory and runs it on the CPU.
 The backbone, depth decoder and vocoder stay on the GPU. The text encoder only reads
 the text before any audio comes out, so it is the one part that can leave the GPU

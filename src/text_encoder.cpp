@@ -49,7 +49,6 @@ std::vector<float> text_encoder_forward(BreezeModel & m, const std::vector<int> 
     std::vector<int32_t> pos_i(T);
     for (int i = 0; i < T; i++) pos_i[i] = i;
 
-    ggml_tensor * tok = g.input_i32(tok_i, T);
     ggml_tensor * pos = g.input_i32(pos_i, T);
 
     std::vector<float> mask_full = build_bidirectional_mask(T, T, 0);
@@ -57,7 +56,17 @@ std::vector<float> text_encoder_forward(BreezeModel & m, const std::vector<int> 
     ggml_tensor * mfull = g.input_f32(mask_full, T, T);
     ggml_tensor * mwin = g.input_f32(mask_win, T, T);
 
-    ggml_tensor * x = ggml_get_rows(g.ctx, m.w("te.token_embd.weight"), tok);
+    ggml_tensor * x;
+    if (m.te_embedding_cpu) {
+        Graph lookup(16);
+        ggml_tensor * ids = lookup.input_i32(tok_i, T);
+        ggml_tensor * rows = ggml_get_rows(lookup.ctx, m.w("te.token_embd.weight"), ids);
+        lookup.compute(m.cpu, rows);
+        x = g.input_f32(tensor_to_f32(rows), c.hidden, T);
+    } else {
+        ggml_tensor * tok = g.input_i32(tok_i, T);
+        x = ggml_get_rows(g.ctx, m.w("te.token_embd.weight"), tok);
+    }
     x = ggml_scale(g.ctx, x, c.embed_scale);
 
     for (int il = 0; il < c.n_layer; il++) {
