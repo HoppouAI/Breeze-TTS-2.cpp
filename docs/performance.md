@@ -52,8 +52,9 @@ seeds. All of the gain is in the vocoder, the backbone and depth decoder did not
 5. **Leave the warm up on.** It costs a few seconds at startup and saves that time on
    the requests your users are waiting for.
 6. **Do not judge the first run.** See [The first run is slower](#the-first-run-is-slower).
-7. **Out of video memory?** `--te-cpu` saves about 1 GB, but not together with
-   `--parallel`. See [Short on video memory](#short-on-video-memory).
+7. **Out of video memory?** `BREEZE_TE_EMBED_CPU=1` saves about 300 MB for free, and
+   `--te-cpu` about 1 GB, but not together with `--parallel`. See
+   [Short on video memory](#short-on-video-memory).
 
 ## Picking a model
 
@@ -178,17 +179,6 @@ exactly repeatable output, use `--parallel 1` and generate one request at a time
 
 ## Short on video memory
 
-With a GPU backend, set `BREEZE_TE_EMBED_CPU=1` for a smaller reduction. It keeps only
-`te.token_embd.weight` in system RAM, looks up the selected rows with one CPU
-thread, and transfers those F32 rows to the GPU. Every text-encoder layer still
-runs on the GPU. On the bundled Q8_0 model, the table is about 306 MiB. This
-environment setting works with the CLI, server, C API and Python bindings, and
-is off by default. `BREEZE_TE_THREADS` does not affect its one-thread lookup.
-
-`--te-cpu` or `BREEZE_TE_CPU=1` takes precedence when both modes are requested:
-it moves the full text encoder to the CPU and uses `BREEZE_TE_THREADS` as
-described below.
-
 `--te-cpu` keeps the text encoder's weights in system memory and runs it on the CPU.
 The backbone, depth decoder and vocoder stay on the GPU. The text encoder only reads
 the text before any audio comes out, so it is the one part that can leave the GPU
@@ -228,6 +218,15 @@ generates every stream, so while it encodes, all the other streams stop. With
 for 0.7 to 1.3 s. Streams sharing the GPU only run about 1.1 to 1.3x faster than
 playback, so they cannot make that up and you would hear gaps. This combination has not
 been measured, so if you have to use both, test it with your own clients first.
+
+**A smaller saving that costs nothing.** `BREEZE_TE_EMBED_CPU=1` moves only the text
+encoder's word table into system memory, about 306 MB at Q8_0. The text encoder itself
+stays on the GPU, and the CPU only looks up the rows for the words in your text and
+sends them over. On the RTX 3080 at Q8_0 it saved about 300 to 440 MB, the audio was
+identical byte for byte, and first audio did not change. Any value except `0` turns it
+on, and since it is an environment setting it works the same for the CLI, the server,
+the C API and the Python bindings. If `--te-cpu` or `BREEZE_TE_CPU` is set too, that
+wins, because it moves the whole text encoder anyway.
 
 ## Tuning settings
 
