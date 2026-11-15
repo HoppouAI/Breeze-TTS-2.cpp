@@ -90,7 +90,15 @@ let
 		"--idle-unload"
 		(toString cfg.idleUnload)
 	]
+	++ lib.optionals (cfg.beforeLoad != null) [
+		"--before-load"
+		(systemdArg cfg.beforeLoad)
+	]
 	++ cfg.extraArgs;
+
+	# ExecStart is one string: a value with spaces has to arrive as one argument,
+	# and systemd would expand % specifiers and $ variables in it otherwise
+	systemdArg = s: lib.escapeShellArg (builtins.replaceStrings [ "%" "$" ] [ "%%" "$$" ] s);
 
 	# systemd manages StateDirectory= entries only under /var/lib; anywhere
 	# else the operator owns the directory
@@ -169,6 +177,13 @@ in
 			default = 0;
 			example = 900;
 			description = "Seconds with nothing generating before the model leaves the GPU (--idle-unload); the next request loads it back first. 0 keeps it resident. POST /v1/unload does the same on demand.";
+		};
+
+		beforeLoad = lib.mkOption {
+			type = lib.types.nullOr lib.types.str;
+			default = null;
+			example = "/run/current-system/sw/bin/gpu-broker make-room --for breeze-tts";
+			description = "Shell command run before every model load, startup included (--before-load), so whatever manages a shared GPU can make room first. Advisory: a failing command is logged and the load goes ahead. Use an absolute path, the unit's PATH is minimal.";
 		};
 
 		extraArgs = lib.mkOption {

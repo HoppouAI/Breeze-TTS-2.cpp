@@ -87,6 +87,11 @@ bool GenScheduler::resident() {
     return m_resident;
 }
 
+int GenScheduler::slots_in_use() {
+    std::lock_guard<std::mutex> lock(m_slot_mu);
+    return m_parallel - m_slots;
+}
+
 double GenScheduler::idle_seconds() {
     std::lock_guard<std::mutex> lock(m_slot_mu);
     if (m_slots != m_parallel) return 0;

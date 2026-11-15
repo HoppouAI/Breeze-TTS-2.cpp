@@ -28,7 +28,7 @@ breeze-server <model.gguf> [--host H] [--port P] [--webui] [--cpu]
                            [--voices-dir PATH] [--ws-port P] [--split-chars N]
                            [--cors [ORIGINS]] [--no-warmup] [--parallel N]
                            [--talk] [--llm URL] [--tyger URL]
-                           [--idle-unload SECONDS] [--lazy]
+                           [--idle-unload SECONDS] [--lazy] [--before-load CMD]
 ```
 
 | Flag | Default | Meaning |
@@ -52,6 +52,7 @@ breeze-server <model.gguf> [--host H] [--port P] [--webui] [--cpu]
 | `--tyger` | `ws://127.0.0.1:8765/ws` | tyger-server websocket the demo uses for turn taking. |
 | `--idle-unload` | `0` | Take the model off the GPU after this many seconds with nothing generating. `0` never does. See [Freeing video memory](#freeing-video-memory). |
 | `--lazy` | off | Start with the model off the GPU, the first request loads it. |
+| `--before-load` | none | Shell command run before every load, startup included. See [Freeing video memory](#freeing-video-memory). |
 
 ```
 breeze-server breeze-tts-2-q4_k.gguf --port 8137 --webui
@@ -103,6 +104,17 @@ startup, for the sample rate and the voice format, then releases it.
 
 `GET /health` reports which state the model is in under `loaded`, and keeps
 answering `200` either way, since the server itself is up.
+
+When several services share one GPU, `--before-load CMD` runs a shell command
+before every load, the one at startup included, so whatever manages the GPU can
+make room first. The server waits for it and then loads. The command only
+advises: a non zero exit is logged and the load goes ahead anyway, so a failure
+there costs at most a `503` that would have happened without it.
+
+```
+breeze-server breeze-tts-2-q4_k.gguf --lazy --idle-unload 900 \
+    --before-load "gpu-broker make-room --for breeze-tts"
+```
 
 ## Console output
 
@@ -284,7 +296,7 @@ curl http://127.0.0.1:8137/health
 ```
 
 ```json
-{"status":"ok","sample_rate":24000,"ws_port":8081,"loaded":true}
+{"status":"ok","sample_rate":24000,"ws_port":8081,"loaded":true,"busy":false,"idle_seconds":42}
 ```
 
 The server does not accept connections until loading finishes, so a successful
@@ -295,7 +307,10 @@ guessing at a delay.
 clients can discover it rather than being configured with it.
 
 `loaded` is `false` while the model is off the GPU, see
-[Freeing video memory](#freeing-video-memory).
+[Freeing video memory](#freeing-video-memory). `busy` is `true` while anything holds a
+generation slot (speech, conversion, encoding a voice), and `idle_seconds` is how long
+nothing has, `0` while busy. Together they let something sharing the GPU tell an idle
+server from a working one without asking it to unload.
 
 ## `POST /v1/audio/speech`
 

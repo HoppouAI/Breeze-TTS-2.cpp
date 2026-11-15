@@ -16,11 +16,14 @@
 
 #ifdef _WIN32
 #include <windows.h> // after httplib, it pulls in winsock2 first
+#else
+#include <sys/wait.h>
 #endif
 
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -139,11 +142,26 @@ static void run_generation(BreezeModel & model, MimiCodec & codec, GenScheduler 
     fflush(stdout);
 }
 
+// gives whatever manages the gpu a chance to make room first. it only advises: a failing
+// command is reported and the load goes ahead anyway, the load itself has the last word
+static void before_load(const ServerOptions & opts) {
+    if (opts.before_load.empty()) return;
+    printf("before load: %s\n", opts.before_load.c_str());
+    fflush(stdout);
+    int rc = std::system(opts.before_load.c_str());
+#ifndef _WIN32
+    // system hands back a wait status there, not the exit code
+    if (rc != -1) rc = WIFEXITED(rc) ? WEXITSTATUS(rc) : 128 + WTERMSIG(rc);
+#endif
+    if (rc != 0) fprintf(stderr, "before load command exited with %d, loading anyway\n", rc);
+}
+
 int run_server(const ServerOptions & opts) {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8); // otherwise the bar glyphs and any chinese text come out as mojibake
 #endif
     BreezeModel model;
+    before_load(opts);
     printf("loading %s ...\n", opts.model.c_str());
     if (!model.load(opts.model, opts.use_gpu, opts.te_cpu)) {
         fprintf(stderr, "failed to load model\n");
@@ -179,6 +197,7 @@ int run_server(const ServerOptions & opts) {
     // read at startup and does not change between loads of the same file
     sched.set_residency(
         [&] {
+            before_load(opts);
             printf("loading %s ...\n", opts.model.c_str());
             fflush(stdout);
             const auto t0 = std::chrono::steady_clock::now();
@@ -255,7 +274,9 @@ int run_server(const ServerOptions & opts) {
     svr.Get("/health", [&](const httplib::Request &, httplib::Response & res) {
         res.set_content("{\"status\":\"ok\",\"sample_rate\":" + std::to_string(sr) +
                         ",\"ws_port\":" + std::to_string(ws_port > 0 ? ws_port : 0) +
-                        ",\"loaded\":" + (sched.resident() ? "true" : "false") + "}",
+                        ",\"loaded\":" + (sched.resident() ? "true" : "false") +
+                        ",\"busy\":" + (sched.slots_in_use() > 0 ? "true" : "false") +
+                        ",\"idle_seconds\":" + std::to_string((long long) sched.idle_seconds()) + "}",
                         "application/json");
     });
 

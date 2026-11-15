@@ -13,7 +13,7 @@ int main(int argc, char ** argv) {
         printf("                     [--voices-dir PATH] [--ws-port P] [--split-chars N]\n");
         printf("                     [--cors [ORIGINS]] [--no-warmup] [--parallel N]\n");
         printf("                     [--talk] [--llm URL] [--tyger URL]\n");
-        printf("                     [--idle-unload SECONDS] [--lazy]\n");
+        printf("                     [--idle-unload SECONDS] [--lazy] [--before-load CMD]\n");
         printf("\n");
         printf("  --chunk-first  fewest frames in the first streamed chunk, lower starts sooner (default 1).\n");
         printf("                 it goes up by itself when the gpu is too busy to stay ahead with that few\n");
@@ -43,6 +43,8 @@ int main(int argc, char ** argv) {
         printf("                 generating (default 0, never). the next request loads it back first.\n");
         printf("                 POST /v1/unload does the same on demand, POST /v1/load ahead of time\n");
         printf("  --lazy         start with the model off the gpu, the first request loads it\n");
+        printf("  --before-load  shell command run before every load, startup included, so something\n");
+        printf("                 managing the gpu can make room. a failing command does not stop the load\n");
         return argc < 2 ? 1 : 0;
     }
     ServerOptions opts;
@@ -63,6 +65,7 @@ int main(int argc, char ** argv) {
         else if (a == "--no-warmup") opts.warmup = false;
         else if (a == "--idle-unload" && i + 1 < argc) opts.idle_unload = atoi(argv[++i]);
         else if (a == "--lazy") opts.lazy = true;
+        else if (a == "--before-load" && i + 1 < argc) opts.before_load = argv[++i];
         else if (a == "--parallel" && i + 1 < argc) opts.parallel = atoi(argv[++i]);
         else if (a == "--talk") opts.talk = true;
         else if (a == "--llm" && i + 1 < argc) opts.llm = argv[++i];

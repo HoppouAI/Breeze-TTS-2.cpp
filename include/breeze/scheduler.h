@@ -45,6 +45,8 @@ public:
     bool resident();
     // how long every slot has been free, 0 while one is held
     double idle_seconds();
+    // slots held right now, by generation, conversion or voice encoding
+    int slots_in_use();
 
     // cfg runs every frame twice, so a stream with it costs what two without it do
     int cost(float cfg_scale) const { return cfg_scale != 1.0f && m_parallel > 1 ? 2 : 1; }

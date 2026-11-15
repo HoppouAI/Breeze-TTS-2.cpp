@@ -21,6 +21,7 @@ struct ServerOptions {
     bool warmup = true;
     int idle_unload = 0; // seconds with nothing generating before the model leaves the gpu, 0 never
     bool lazy = false;   // start with the model off the gpu, the first request loads it
+    std::string before_load; // shell command run before every load, so something can make room on the gpu
     std::string cors; // empty turns cors off, "*" allows any origin, otherwise a comma separated allowlist
     bool talk = false; // the voice call demo at /talk
     std::string llm; // openai compatible base url the demo talks to, proxied under /llm/
