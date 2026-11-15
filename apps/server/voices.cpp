@@ -224,7 +224,11 @@ void VoiceStore::add_routes(httplib::Server & svr, BreezeModel & model, MimiCode
         if (pcm.empty()) return fail(res, 400, "could not read ref_audio");
 
         // encoding runs on the same device generation does, so it waits its turn
-        if (!sched.try_acquire()) return fail(res, 409, "busy");
+        switch (sched.take()) {
+            case GenScheduler::Take::ok: break;
+            case GenScheduler::Take::busy: return fail(res, 409, "busy");
+            case GenScheduler::Take::unavailable: return fail(res, 503, "the model could not be loaded");
+        }
 
         v.text = text;
         const auto t0 = std::chrono::steady_clock::now();

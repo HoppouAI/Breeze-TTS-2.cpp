@@ -19,10 +19,12 @@
 #endif
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace breeze {
@@ -80,6 +82,17 @@ struct SlotHold {
     SlotHold(GenScheduler & s, int count) : sched(s), n(count) {}
     ~SlotHold() { sched.release(n); }
 };
+
+// takes n slots or answers for it: 409 while they are all in use, 503 when the model was off
+// the gpu and would not load back (another process holding the memory, usually)
+static bool take_or_fail(GenScheduler & sched, int n, httplib::Response & res) {
+    const GenScheduler::Take took = sched.take(n);
+    if (took == GenScheduler::Take::ok) return true;
+    const bool busy = took == GenScheduler::Take::busy;
+    res.status = busy ? 409 : 503;
+    res.set_content(busy ? "{\"error\":\"busy\"}" : "{\"error\":\"the model could not be loaded\"}", "application/json");
+    return false;
+}
 
 // one generation with the console progress bar, emit gets each decoded chunk and false stops it
 static void run_generation(BreezeModel & model, MimiCodec & codec, GenScheduler & sched, const GenRequest & g, int sr,
@@ -139,7 +152,13 @@ int run_server(const ServerOptions & opts) {
     printf("backend: %s, sample rate: %d\n", model.backend.name(), model.cfg.sample_rate);
     MimiCodec codec;
     codec.init(model);
-    if (opts.warmup) {
+    GenScheduler sched;
+    sched.start(model, opts.parallel);
+
+    // nothing else is on the gpu yet at startup, and on a reload every slot is free, so the
+    // inline warm up races nothing
+    const auto warm = [&] {
+        if (!opts.warmup) return;
         printf("warming up ...\n");
         fflush(stdout);
         const auto tw = std::chrono::steady_clock::now();
@@ -148,23 +167,73 @@ int run_server(const ServerOptions & opts) {
         base.chunk_max = opts.chunk_max;
         try {
             warm_up(model, codec, base);
+            sched.warm_up(GenRequest());
             printf("warmed up in %.1f s\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - tw).count());
         } catch (const std::exception & e) {
             fprintf(stderr, "warm up failed: %s\n", e.what());
         }
-    }
+    };
 
-    GenScheduler sched;
-    sched.start(model, opts.parallel);
-    if (opts.warmup) {
-        GenRequest base;
-        try {
-            sched.warm_up(base);
-        } catch (const std::exception & e) {
-            fprintf(stderr, "warm up failed: %s\n", e.what());
-        }
+    // the model, codec and scheduler objects stay put across an unload, only what they hold on
+    // the gpu goes, so every reference the routes and sessions keep stays valid. the config was
+    // read at startup and does not change between loads of the same file
+    sched.set_residency(
+        [&] {
+            printf("loading %s ...\n", opts.model.c_str());
+            fflush(stdout);
+            const auto t0 = std::chrono::steady_clock::now();
+            if (!model.load(opts.model, opts.use_gpu, opts.te_cpu)) {
+                fprintf(stderr, "failed to load model\n");
+                model.free();
+                model = BreezeModel();
+                return false;
+            }
+            codec.init(model);
+            warm();
+            printf("loaded in %.1f s\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+            fflush(stdout);
+            return true;
+        },
+        [&] {
+            model.free();
+            model = BreezeModel();
+            printf("model unloaded, gpu memory released\n");
+            fflush(stdout);
+        });
+
+    if (opts.lazy) {
+        sched.unload();
+        printf("model off the gpu until the first request\n");
+    } else {
+        warm();
     }
     if (opts.parallel > 1) printf("up to %d streams at once\n", opts.parallel);
+
+    // gives the gpu back after a quiet spell, the next request loads it again
+    std::mutex idle_mu;
+    std::condition_variable idle_cv;
+    bool idle_stop = false;
+    std::thread idle_thread;
+    if (opts.idle_unload > 0) {
+        idle_thread = std::thread([&] {
+            const auto tick = std::chrono::seconds(opts.idle_unload < 5 ? 1 : 5);
+            std::unique_lock<std::mutex> lock(idle_mu);
+            while (!idle_cv.wait_for(lock, tick, [&] { return idle_stop; })) {
+                if (sched.resident() && sched.idle_seconds() >= opts.idle_unload && sched.unload())
+                    printf("idle for %d s\n", opts.idle_unload);
+            }
+        });
+        printf("unloads after %d s idle\n", opts.idle_unload);
+    }
+    const auto stop_idle = [&] {
+        if (!idle_thread.joinable()) return;
+        {
+            std::lock_guard<std::mutex> lock(idle_mu);
+            idle_stop = true;
+        }
+        idle_cv.notify_all();
+        idle_thread.join();
+    };
 
     httplib::Server svr;
     const int sr = model.cfg.sample_rate;
@@ -185,8 +254,29 @@ int run_server(const ServerOptions & opts) {
 
     svr.Get("/health", [&](const httplib::Request &, httplib::Response & res) {
         res.set_content("{\"status\":\"ok\",\"sample_rate\":" + std::to_string(sr) +
-                        ",\"ws_port\":" + std::to_string(ws_port > 0 ? ws_port : 0) + "}",
+                        ",\"ws_port\":" + std::to_string(ws_port > 0 ? ws_port : 0) +
+                        ",\"loaded\":" + (sched.resident() ? "true" : "false") + "}",
                         "application/json");
+    });
+
+    // frees the gpu without stopping the server, the next request that needs the model loads it
+    svr.Post("/v1/unload", [&](const httplib::Request &, httplib::Response & res) {
+        if (!sched.unload()) {
+            res.status = 409;
+            res.set_content("{\"error\":\"busy\"}", "application/json");
+            return;
+        }
+        res.set_content("{\"loaded\":false}", "application/json");
+    });
+
+    // loads ahead of the first request so it does not pay for it
+    svr.Post("/v1/load", [&](const httplib::Request &, httplib::Response & res) {
+        if (!sched.load()) {
+            res.status = 503;
+            res.set_content("{\"error\":\"the model could not be loaded\"}", "application/json");
+            return;
+        }
+        res.set_content("{\"loaded\":true}", "application/json");
     });
 
     // openai clients post json to the same path, the form fields keep the native behaviour
@@ -200,9 +290,13 @@ int run_server(const ServerOptions & opts) {
             return;
         }
         const int cost = sched.cost(o.g.cfg_scale);
-        if (!sched.try_acquire(cost)) {
-            res.status = 409;
-            res.set_content(openai_error("busy, every generation slot is taken", "server_error"), "application/json");
+        const GenScheduler::Take took = sched.take(cost);
+        if (took != GenScheduler::Take::ok) {
+            const bool busy = took == GenScheduler::Take::busy;
+            res.status = busy ? 409 : 503;
+            res.set_content(openai_error(busy ? "busy, every generation slot is taken" : "the model could not be loaded",
+                                         "server_error"),
+                            "application/json");
             return;
         }
         auto slot = std::make_shared<SlotHold>(sched, cost);
@@ -258,11 +352,7 @@ int run_server(const ServerOptions & opts) {
             return;
         }
         const int cost = sched.cost((float) atof(field(req, "cfg_scale", "1.0").c_str()));
-        if (!sched.try_acquire(cost)) {
-            res.status = 409;
-            res.set_content("{\"error\":\"busy\"}", "application/json");
-            return;
-        }
+        if (!take_or_fail(sched, cost, res)) return;
         auto slot = std::make_shared<SlotHold>(sched, cost);
         GenRequest g;
         g.text = field(req, "text", "");
@@ -350,11 +440,7 @@ int run_server(const ServerOptions & opts) {
 
     svr.Post("/v1/audio/convert", [&](const httplib::Request & req, httplib::Response & res) {
         // this one runs for a while and doesnt share a batch, so it needs the whole gpu
-        if (!sched.try_acquire(sched.parallel())) {
-            res.status = 409;
-            res.set_content("{\"error\":\"busy\"}", "application/json");
-            return;
-        }
+        if (!take_or_fail(sched, sched.parallel(), res)) return;
         struct AllSlots {
             GenScheduler & s;
             ~AllSlots() { s.release(s.parallel()); }
@@ -483,9 +569,11 @@ int run_server(const ServerOptions & opts) {
     printf("listening on http://%s:%d\n", opts.host.c_str(), opts.port);
     if (!svr.listen(opts.host, opts.port)) {
         fprintf(stderr, "failed to bind %s:%d\n", opts.host.c_str(), opts.port);
+        stop_idle();
         sched.stop();
         return 1;
     }
+    stop_idle();
     sched.stop();
     model.free();
     return 0;

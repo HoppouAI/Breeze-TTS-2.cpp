@@ -13,6 +13,7 @@ int main(int argc, char ** argv) {
         printf("                     [--voices-dir PATH] [--ws-port P] [--split-chars N]\n");
         printf("                     [--cors [ORIGINS]] [--no-warmup] [--parallel N]\n");
         printf("                     [--talk] [--llm URL] [--tyger URL]\n");
+        printf("                     [--idle-unload SECONDS] [--lazy]\n");
         printf("\n");
         printf("  --chunk-first  fewest frames in the first streamed chunk, lower starts sooner (default 1).\n");
         printf("                 it goes up by itself when the gpu is too busy to stay ahead with that few\n");
@@ -38,6 +39,10 @@ int main(int argc, char ** argv) {
         printf("  --tyger URL    tyger-server websocket for the demo (default ws://127.0.0.1:8765/ws)\n");
         printf("  --no-warmup    skip the short throwaway generation at startup, the first request\n");
         printf("                 then pays for setting up the gpu pipelines instead\n");
+        printf("  --idle-unload  take the model off the gpu after this many seconds with nothing\n");
+        printf("                 generating (default 0, never). the next request loads it back first.\n");
+        printf("                 POST /v1/unload does the same on demand, POST /v1/load ahead of time\n");
+        printf("  --lazy         start with the model off the gpu, the first request loads it\n");
         return argc < 2 ? 1 : 0;
     }
     ServerOptions opts;
@@ -56,6 +61,8 @@ int main(int argc, char ** argv) {
         else if (a == "--chunk-max" && i + 1 < argc) opts.chunk_max = atoi(argv[++i]);
         else if (a == "--split-chars" && i + 1 < argc) opts.split_chars = atoi(argv[++i]);
         else if (a == "--no-warmup") opts.warmup = false;
+        else if (a == "--idle-unload" && i + 1 < argc) opts.idle_unload = atoi(argv[++i]);
+        else if (a == "--lazy") opts.lazy = true;
         else if (a == "--parallel" && i + 1 < argc) opts.parallel = atoi(argv[++i]);
         else if (a == "--talk") opts.talk = true;
         else if (a == "--llm" && i + 1 < argc) opts.llm = argv[++i];
@@ -71,6 +78,10 @@ int main(int argc, char ** argv) {
     if (opts.talk && opts.llm.empty()) opts.llm = "http://127.0.0.1:1234/v1";
     if (opts.parallel < 1) {
         fprintf(stderr, "--parallel must be at least 1\n");
+        return 1;
+    }
+    if (opts.idle_unload < 0) {
+        fprintf(stderr, "--idle-unload must be 0 or more\n");
         return 1;
     }
     if (opts.chunk_first < 1 || opts.chunk_max < 1) {

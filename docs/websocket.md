@@ -55,7 +55,7 @@ the rate given in the `ready` message, exactly like the HTTP body.
 | `instruction_set` | | The new delivery applies to text sent from here on. |
 | `cancelled` | | Generation was interrupted. |
 | `done` | | Everything buffered has been spoken. |
-| `error` | `message` | Something was wrong with the request. |
+| `error` | `message` | Something was wrong with the request, or the model was off the GPU and could not be loaded back (`the model could not be loaded`), in which case that piece is skipped. |
 
 ## A session
 
