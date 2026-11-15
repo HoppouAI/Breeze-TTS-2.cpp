@@ -84,7 +84,13 @@ let
 		(toString cfg.port)
 		"--voices-dir"
 		voicesDir
-	] ++ lib.optionals cfg.webui [ "--webui" ] ++ cfg.extraArgs;
+	] ++ lib.optionals cfg.webui [ "--webui" ]
+	++ lib.optionals cfg.lazy [ "--lazy" ]
+	++ lib.optionals (cfg.idleUnload > 0) [
+		"--idle-unload"
+		(toString cfg.idleUnload)
+	]
+	++ cfg.extraArgs;
 
 	# systemd manages StateDirectory= entries only under /var/lib; anywhere
 	# else the operator owns the directory
@@ -150,6 +156,19 @@ in
 			type = lib.types.bool;
 			default = false;
 			description = "Serve the bundled web UI at / (opt-in: the flag is --webui).";
+		};
+
+		lazy = lib.mkOption {
+			type = lib.types.bool;
+			default = false;
+			description = "Start with the model off the GPU: the server reads it once for its configuration, releases it, and the first request that needs it loads it back (about 2 to 4 s, warm up included). Keeps a service that starts at boot from holding video memory it is not using yet.";
+		};
+
+		idleUnload = lib.mkOption {
+			type = lib.types.ints.unsigned;
+			default = 0;
+			example = 900;
+			description = "Seconds with nothing generating before the model leaves the GPU (--idle-unload); the next request loads it back first. 0 keeps it resident. POST /v1/unload does the same on demand.";
 		};
 
 		extraArgs = lib.mkOption {
