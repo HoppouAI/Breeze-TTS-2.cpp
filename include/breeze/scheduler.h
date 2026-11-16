@@ -26,9 +26,27 @@ public:
     GenPool & pool() { return m_pool; }
 
     // a request holds slots for as long as it generates, try fails when too few are free
-    bool try_acquire(int n = 1);
-    void acquire(int n = 1);
+    bool try_acquire(int n = 1) { return take(n) == Take::ok; }
+    // false only when the model was off the gpu and could not be loaded back
+    [[nodiscard]] bool acquire(int n = 1);
     void release(int n = 1);
+
+    // residency. with the hooks set the model can leave the gpu while no slot is held, and whatever
+    // takes the next slot loads it back first. without them it just stays resident.
+    // load runs with the slots locked, so it can warm up through exec but must not take a slot
+    void set_residency(std::function<bool()> load, std::function<void()> unload);
+    enum class Take { ok, busy, unavailable };
+    // try_acquire that can tell a full gpu apart from a model that would not load back
+    Take take(int n = 1);
+    // false while any slot is held, or when there are no hooks
+    bool unload();
+    // brings the model back without taking a slot, false when loading failed
+    bool load();
+    bool resident();
+    // how long every slot has been free, 0 while one is held
+    double idle_seconds();
+    // slots held right now, by generation, conversion or voice encoding
+    int slots_in_use();
 
     // cfg runs every frame twice, so a stream with it costs what two without it do
     int cost(float cfg_scale) const { return cfg_scale != 1.0f && m_parallel > 1 ? 2 : 1; }
@@ -63,9 +81,15 @@ private:
     GenPool m_pool;
     int m_parallel = 1;
 
+    bool ensure_resident(); // m_slot_mu held
+
     std::mutex m_slot_mu;
     std::condition_variable m_slot_cv;
     int m_slots = 0;
+    bool m_resident = true;
+    std::function<bool()> m_load;
+    std::function<void()> m_unload;
+    std::chrono::steady_clock::time_point m_last_use;
 
     std::mutex m_mu;
     std::condition_variable m_cv;

@@ -6,7 +6,9 @@ rather than waiting for the whole clip.
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /health` | Liveness, sample rate, websocket port |
+| `GET /health` | Liveness, sample rate, websocket port, whether the model is on the GPU |
+| `POST /v1/unload` | Take the model off the GPU without stopping the server, see [Freeing video memory](#freeing-video-memory) |
+| `POST /v1/load` | Load it back ahead of the next request |
 | `POST /v1/audio/speech` | Generate speech, streamed. Also takes OpenAI style JSON, see [OpenAI compatible requests](#openai-compatible-requests) |
 | `POST /v1/audio/convert` | Respeak a recording in another voice, see [voice-conversion.md](voice-conversion.md) |
 | `POST /v1/voices` | Register or save a reference voice, see [voices.md](voices.md) |
@@ -26,6 +28,7 @@ breeze-server <model.gguf> [--host H] [--port P] [--webui] [--cpu]
                            [--voices-dir PATH] [--ws-port P] [--split-chars N]
                            [--cors [ORIGINS]] [--no-warmup] [--parallel N]
                            [--talk] [--llm URL] [--tyger URL]
+                           [--idle-unload SECONDS] [--lazy] [--before-load CMD]
 ```
 
 | Flag | Default | Meaning |
@@ -47,6 +50,9 @@ breeze-server <model.gguf> [--host H] [--port P] [--webui] [--cpu]
 | `--talk` | off | Serve the voice call demo at `/talk`. See [Voice call demo](#voice-call-demo). |
 | `--llm` | `http://127.0.0.1:1234/v1` with `--talk` | OpenAI compatible server the demo gets its replies from, passed through under `/llm/`. |
 | `--tyger` | `ws://127.0.0.1:8765/ws` | tyger-server websocket the demo uses for turn taking. |
+| `--idle-unload` | `0` | Take the model off the GPU after this many seconds with nothing generating. `0` never does. See [Freeing video memory](#freeing-video-memory). |
+| `--lazy` | off | Start with the model off the GPU, the first request loads it. |
+| `--before-load` | none | Shell command run before every load, startup included. See [Freeing video memory](#freeing-video-memory). |
 
 ```
 breeze-server breeze-tts-2-q4_k.gguf --port 8137 --webui
@@ -59,6 +65,56 @@ request would otherwise have to build. The first request after startup then reac
 first audio in about 200 to 350 ms on an RTX 3060, and later ones in about 80 ms. It
 adds about 3 s to startup at `--parallel 1` and about 8 s at `--parallel 4`.
 `--no-warmup` skips it.
+
+## Freeing video memory
+
+The model stays on the GPU for as long as the server runs, about 2.9 GB at Q4_K.
+When something else needs that memory, the server can give it back without being
+stopped:
+
+```
+curl -X POST http://127.0.0.1:8137/v1/unload
+```
+
+```json
+{"loaded":false}
+```
+
+The weights, the generation caches and the Vulkan backend are released, which
+leaves the process holding a few tens of MB. Everything else stays: the listeners,
+open WebSocket sessions, and every cached and saved voice, since a voice is kept as
+encoded codes in system memory. The next request that needs the model loads it back
+first, warm up included unless `--no-warmup` is set, so it pays about 2 to 4 s
+before its audio starts. Requests that arrive while that load runs wait for it, then
+get a slot or a `409` like any other request.
+
+`POST /v1/load` does the load ahead of time, for when a client knows it is about to
+speak. Both are safe to repeat: unloading an unloaded model or loading a loaded one
+just reports the state.
+
+| Status | Body | Cause |
+| --- | --- | --- |
+| `409` | `{"error":"busy"}` | `/v1/unload` while something is generating. Nothing is interrupted, try again once it finishes. |
+| `503` | `{"error":"the model could not be loaded"}` | The model was off the GPU and loading it back failed, usually because another process is holding the memory. Any request that needs the model answers this way until a load succeeds. |
+
+`--idle-unload SECONDS` does the unload on its own once nothing has generated for
+that long, the same idea as unloading an idle model in an LLM server. `--lazy` starts
+the server with the model already off the GPU. It still reads the model once at
+startup, for the sample rate and the voice format, then releases it.
+
+`GET /health` reports which state the model is in under `loaded`, and keeps
+answering `200` either way, since the server itself is up.
+
+When several services share one GPU, `--before-load CMD` runs a shell command
+before every load, the one at startup included, so whatever manages the GPU can
+make room first. The server waits for it and then loads. The command only
+advises: a non zero exit is logged and the load goes ahead anyway, so a failure
+there costs at most a `503` that would have happened without it.
+
+```
+breeze-server breeze-tts-2-q4_k.gguf --lazy --idle-unload 900 \
+    --before-load "gpu-broker make-room --for breeze-tts"
+```
 
 ## Console output
 
@@ -240,7 +296,7 @@ curl http://127.0.0.1:8137/health
 ```
 
 ```json
-{"status":"ok","sample_rate":24000,"ws_port":8081}
+{"status":"ok","sample_rate":24000,"ws_port":8081,"loaded":true,"busy":false,"idle_seconds":42}
 ```
 
 The server does not accept connections until loading finishes, so a successful
@@ -249,6 +305,12 @@ guessing at a delay.
 
 `ws_port` is where the streaming socket ended up, or `0` when it is disabled, so
 clients can discover it rather than being configured with it.
+
+`loaded` is `false` while the model is off the GPU, see
+[Freeing video memory](#freeing-video-memory). `busy` is `true` while anything holds a
+generation slot (speech, conversion, encoding a voice), and `idle_seconds` is how long
+nothing has, `0` while busy. Together they let something sharing the GPU tell an idle
+server from a working one without asking it to unload.
 
 ## `POST /v1/audio/speech`
 
@@ -311,6 +373,7 @@ long before generation finishes.
 | `400` | `{"error":"text is required"}` | `text` missing or empty. |
 | `404` | `{"error":"unknown voice_id"}` | No cached or saved voice by that name. |
 | `409` | `{"error":"busy"}` | Every generation slot is taken. |
+| `503` | `{"error":"the model could not be loaded"}` | The model was unloaded and could not be loaded back, see [Freeing video memory](#freeing-video-memory). |
 
 The server holds one model and by default serves one request at a time. `--parallel`
 raises that, and a request using guidance takes two slots, see

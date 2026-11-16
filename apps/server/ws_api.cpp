@@ -126,9 +126,14 @@ static void speaker(WsConn & conn, Session & s, GenScheduler & sched) {
         }
         if (s.cancel) { s.cancel = false; continue; }
 
-        if (!sched.try_acquire(s.cost)) {
+        GenScheduler::Take took = sched.take(s.cost);
+        if (took == GenScheduler::Take::busy) {
             event(conn, "queued");
-            sched.acquire(s.cost);
+            took = sched.acquire(s.cost) ? GenScheduler::Take::ok : GenScheduler::Take::unavailable;
+        }
+        if (took == GenScheduler::Take::unavailable) {
+            event(conn, "error", "\"message\":\"the model could not be loaded\"");
+            continue;
         }
         if (s.cancel) { sched.release(s.cost); s.cancel = false; continue; }
 

@@ -9,6 +9,7 @@ void GenScheduler::start(BreezeModel & m, int parallel) {
     m_model = &m;
     m_parallel = parallel < 1 ? 1 : parallel;
     m_slots = m_parallel;
+    m_last_use = std::chrono::steady_clock::now();
     m_stop = false;
     m_thread = std::thread([this] { loop(); });
 }
@@ -25,25 +26,76 @@ void GenScheduler::stop() {
     m_pool.free();
 }
 
-bool GenScheduler::try_acquire(int n) {
+void GenScheduler::set_residency(std::function<bool()> load, std::function<void()> unload) {
     std::lock_guard<std::mutex> lock(m_slot_mu);
-    if (m_slots < n) return false;
-    m_slots -= n;
+    m_load = std::move(load);
+    m_unload = std::move(unload);
+}
+
+// nobody holds a slot while the model is away, so loading under the slot lock races nothing:
+// everyone else who wants one waits here until it is back
+bool GenScheduler::ensure_resident() {
+    if (m_resident) return true;
+    if (!m_load || !m_load()) return false;
+    m_resident = true;
     return true;
 }
 
-void GenScheduler::acquire(int n) {
+GenScheduler::Take GenScheduler::take(int n) {
+    std::lock_guard<std::mutex> lock(m_slot_mu);
+    if (m_slots < n) return Take::busy;
+    if (!ensure_resident()) return Take::unavailable;
+    m_slots -= n;
+    return Take::ok;
+}
+
+bool GenScheduler::acquire(int n) {
     std::unique_lock<std::mutex> lock(m_slot_mu);
     m_slot_cv.wait(lock, [&] { return m_slots >= n; });
+    if (!ensure_resident()) return false;
     m_slots -= n;
+    return true;
 }
 
 void GenScheduler::release(int n) {
     {
         std::lock_guard<std::mutex> lock(m_slot_mu);
         m_slots += n;
+        m_last_use = std::chrono::steady_clock::now();
     }
     m_slot_cv.notify_all();
+}
+
+bool GenScheduler::unload() {
+    std::lock_guard<std::mutex> lock(m_slot_mu);
+    if (!m_resident) return true;
+    if (!m_unload || m_slots != m_parallel) return false;
+    // the pool's graphs and caches belong to the gpu thread, it drops them between frames
+    exec([this] { m_pool.free(); });
+    m_unload();
+    m_resident = false;
+    return true;
+}
+
+bool GenScheduler::load() {
+    std::lock_guard<std::mutex> lock(m_slot_mu);
+    return ensure_resident();
+}
+
+bool GenScheduler::resident() {
+    std::lock_guard<std::mutex> lock(m_slot_mu);
+    return m_resident;
+}
+
+int GenScheduler::slots_in_use() {
+    std::lock_guard<std::mutex> lock(m_slot_mu);
+    return m_parallel - m_slots;
+}
+
+double GenScheduler::idle_seconds() {
+    std::lock_guard<std::mutex> lock(m_slot_mu);
+    if (m_slots != m_parallel) return 0;
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - m_last_use).count();
 }
 
 void GenScheduler::exec(const std::function<void()> & fn) {

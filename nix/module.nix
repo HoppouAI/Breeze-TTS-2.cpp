@@ -84,7 +84,21 @@ let
 		(toString cfg.port)
 		"--voices-dir"
 		voicesDir
-	] ++ lib.optionals cfg.webui [ "--webui" ] ++ cfg.extraArgs;
+	] ++ lib.optionals cfg.webui [ "--webui" ]
+	++ lib.optionals cfg.lazy [ "--lazy" ]
+	++ lib.optionals (cfg.idleUnload > 0) [
+		"--idle-unload"
+		(toString cfg.idleUnload)
+	]
+	++ lib.optionals (cfg.beforeLoad != null) [
+		"--before-load"
+		(systemdArg cfg.beforeLoad)
+	]
+	++ cfg.extraArgs;
+
+	# ExecStart is one string: a value with spaces has to arrive as one argument,
+	# and systemd would expand % specifiers and $ variables in it otherwise
+	systemdArg = s: lib.escapeShellArg (builtins.replaceStrings [ "%" "$" ] [ "%%" "$$" ] s);
 
 	# systemd manages StateDirectory= entries only under /var/lib; anywhere
 	# else the operator owns the directory
@@ -152,6 +166,26 @@ in
 			description = "Serve the bundled web UI at / (opt-in: the flag is --webui).";
 		};
 
+		lazy = lib.mkOption {
+			type = lib.types.bool;
+			default = false;
+			description = "Start with the model off the GPU: the server reads it once for its configuration, releases it, and the first request that needs it loads it back (about 2 to 4 s, warm up included). Keeps a service that starts at boot from holding video memory it is not using yet.";
+		};
+
+		idleUnload = lib.mkOption {
+			type = lib.types.ints.unsigned;
+			default = 0;
+			example = 900;
+			description = "Seconds with nothing generating before the model leaves the GPU (--idle-unload); the next request loads it back first. 0 keeps it resident. POST /v1/unload does the same on demand.";
+		};
+
+		beforeLoad = lib.mkOption {
+			type = lib.types.nullOr lib.types.str;
+			default = null;
+			example = "/run/current-system/sw/bin/gpu-broker make-room --for breeze-tts";
+			description = "Shell command run before every model load, startup included (--before-load), so whatever manages a shared GPU can make room first. Advisory: a failing command is logged and the load goes ahead. Use an absolute path, the unit's PATH is minimal.";
+		};
+
 		extraArgs = lib.mkOption {
 			type = lib.types.listOf lib.types.str;
 			default = [];
@@ -190,6 +224,8 @@ in
 					"${stateSubdir}/voices"
 					"${stateSubdir}/models"
 				];
+				# the gpu driver's shader cache (see XDG_CACHE_HOME below)
+				CacheDirectory = "breeze-tts";
 				# Voice files are user content; keep them on restarts
 				Restart = "on-failure";
 				RestartSec = 5;
@@ -202,6 +238,11 @@ in
 			# opengl option in older releases) is enabled.
 			environment.VK_ICD_FILENAMES =
 				"/run/opengl-driver/share/vulkan/icd.d:/run/opengl-driver-32/share/vulkan/icd.d";
+			# A system unit has no home, so without this the driver keeps no shader
+			# cache and every load recompiles the Vulkan pipelines: warm up takes
+			# about 17 s instead of 1 s on an RTX 4090, paid again on every reload
+			# with lazy/idleUnload. NVIDIA and Mesa both cache under it.
+			environment.XDG_CACHE_HOME = "/var/cache/breeze-tts";
 		};
 	};
 }
