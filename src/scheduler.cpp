@@ -38,6 +38,8 @@ bool GenScheduler::ensure_resident() {
     if (m_resident) return true;
     if (!m_load || !m_load()) return false;
     m_resident = true;
+    // a fresh load counts as use, or the idle unloader takes it straight back off
+    m_last_use = std::chrono::steady_clock::now();
     return true;
 }
 
