@@ -224,6 +224,8 @@ in
 					"${stateSubdir}/voices"
 					"${stateSubdir}/models"
 				];
+				# the gpu driver's shader cache (see XDG_CACHE_HOME below)
+				CacheDirectory = "breeze-tts";
 				# Voice files are user content; keep them on restarts
 				Restart = "on-failure";
 				RestartSec = 5;
@@ -236,6 +238,11 @@ in
 			# opengl option in older releases) is enabled.
 			environment.VK_ICD_FILENAMES =
 				"/run/opengl-driver/share/vulkan/icd.d:/run/opengl-driver-32/share/vulkan/icd.d";
+			# A system unit has no home, so without this the driver keeps no shader
+			# cache and every load recompiles the Vulkan pipelines: warm up takes
+			# about 17 s instead of 1 s on an RTX 4090, paid again on every reload
+			# with lazy/idleUnload. NVIDIA and Mesa both cache under it.
+			environment.XDG_CACHE_HOME = "/var/cache/breeze-tts";
 		};
 	};
 }
