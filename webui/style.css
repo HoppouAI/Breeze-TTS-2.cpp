@@ -262,3 +262,27 @@ footer {
   border-top: 1px solid var(--line);
   padding-top: 16px;
 }
+
+/* subtitles tab */
+#cuelist { max-height: 360px; overflow: auto; border: 2px solid var(--line); margin-bottom: 16px; }
+#cuelist:empty { display: none; }
+.cue {
+  display: grid;
+  grid-template-columns: 32px 120px 1fr 160px 36px;
+  min-width: 560px;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+.cue:last-child { border-bottom: none; }
+.cue input { margin-top: 0; padding: 6px 8px; }
+.cn, .ct { color: var(--dim); white-space: nowrap; }
+.cs { color: var(--dim); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cs.ok { color: var(--accent); }
+.cs.warn { color: #ffd166; }
+.cs.err { color: #ff6b6b; }
+.cue .ghost { padding: 4px 0; }
+.btnrow { display: flex; gap: 12px; margin-top: 12px; }
+.btnrow .ghost { flex: 1; }

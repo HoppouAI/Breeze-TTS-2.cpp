@@ -17,6 +17,7 @@
   <button class="tab" data-tab="clone">VOICE CLONE</button>
   <button class="tab" data-tab="direction">VOICE DIRECTION</button>
   <button class="tab" data-tab="changer">VOICE CHANGER</button>
+  <button class="tab" data-tab="subtitle">SUBTITLES</button>
   <button class="tab" data-tab="library">VOICE LIBRARY</button>
 </nav>
 
@@ -129,6 +130,59 @@
       <label>SEED <input data-f="seed" type="number" value="42" /></label>
     </div>
     <button class="go">CONVERT</button>
+  </section>
+
+  <section class="panel" id="subtitle">
+    <p class="note">dubs a subtitle file line by line and lays each line on the timeline at its cue time, then exports one wav. pick a saved voice for a consistent speaker, or stay on voice design and the first clean line is locked as the voice for the rest. a line longer than its slot is sped up (pitch kept) or pushed later, see FIT below. press REMIX after changing the fit settings.</p>
+    <label>SUBTITLE FILE (SRT, VTT, ASS)
+      <input data-f="subfile" type="file" accept=".srt,.vtt,.ass,.ssa" />
+    </label>
+    <label>VOICE DESCRIPTION / DIRECTION (OPTIONAL)
+      <textarea data-f="instruction" rows="2" placeholder="A warm, thoughtful young woman with a clear, calm delivery."></textarea>
+    </label>
+    <label>SAVED VOICE
+      <select data-f="voice_id"><option value="">upload a clip instead</option></select>
+    </label>
+    <p class="voice-desc"></p>
+    <div class="refblock">
+      <label>REFERENCE AUDIO (WAV)
+        <input data-f="ref_audio" type="file" accept="audio/*" />
+      </label>
+      <label>REFERENCE TRANSCRIPT (EXACT)
+        <textarea data-f="ref_text" rows="2" placeholder="This is the exact transcript of the reference audio."></textarea>
+      </label>
+      <label>DESCRIPTION (OPTIONAL, SAVED WITH THE VOICE)
+        <textarea data-f="save_desc" rows="2" placeholder="Gravelly older narrator, slow and warm. Good for audiobooks."></textarea>
+      </label>
+      <div class="row saverow">
+        <label>SAVE AS <input data-f="save_name" type="text" placeholder="my_voice" /></label>
+        <button class="save-voice">SAVE VOICE</button>
+      </div>
+    </div>
+    <div class="row">
+      <label>CFG SCALE <input data-f="cfg" type="number" value="1" min="1" max="10" step="0.5" /></label>
+      <label>SEED <input data-f="seed" type="number" value="42" /></label>
+      <label>TIME OFFSET (S) <input data-f="offset" type="number" value="0" step="0.1" /></label>
+    </div>
+    <div class="row">
+      <label>FIT, WHEN A LINE RUNS LONG
+        <select data-f="mode">
+          <option value="fit">speed up to fit, then push later</option>
+          <option value="shift">push later, never overlap</option>
+          <option value="overlap">exact start, allow overlap</option>
+        </select>
+      </label>
+      <label>MAX SPEED-UP <input data-f="maxrate" type="number" value="1.4" min="1" max="2" step="0.1" /></label>
+    </div>
+    <label class="toggle"><input data-f="borrow" type="checkbox" checked /> USE THE GAP BEFORE THE NEXT LINE WHEN A LINE RUNS LONG</label>
+    <label class="toggle"><input data-f="lock" type="checkbox" checked /> LOCK THE VOICE AFTER THE FIRST CLEAN LINE (VOICE DESIGN ONLY)</label>
+    <p class="note" id="cuecount"></p>
+    <div id="cuelist"></div>
+    <button class="go">GENERATE DUB</button>
+    <div class="btnrow">
+      <button id="subregen" class="ghost">REGENERATE ALL</button>
+      <button id="subremix" class="ghost">REMIX</button>
+    </div>
   </section>
 
   <section class="panel" id="library">
